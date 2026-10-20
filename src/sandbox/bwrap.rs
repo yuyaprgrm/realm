@@ -14,10 +14,8 @@ pub fn build_command(spec: &SandboxSpec) -> Result<Command> {
         .arg("--unshare-pid")
         .arg("--unshare-uts")
         .arg("--unshare-ipc");
-    // Network namespace: for Internet we rely on pasta-provided netns (pasta
-    // creates/runs in a netns); avoid creating a second isolated netns that
-    // would block connectivity.
-    if spec.network != crate::sandbox::spec::NetworkPolicy::Internet {
+    // Network namespace: share host netns only if NetworkMode::Host
+    if spec.network != crate::sandbox::spec::NetworkMode::Host {
         cmd.arg("--unshare-net");
     }
     cmd.arg("--unshare-cgroup-try")
@@ -117,7 +115,7 @@ fn set_limit(resource: libc::c_uint, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::spec::{NetworkPolicy, ResourceLimits, SandboxSpec};
+    use crate::sandbox::spec::{NetworkMode, ResourceLimits, SandboxSpec};
 
     fn spec() -> SandboxSpec {
         SandboxSpec {
@@ -137,7 +135,7 @@ mod tests {
             path_bins: vec![],
             executable: "/bin/sh".into(),
             args: vec![],
-            network: NetworkPolicy::Disabled,
+            network: NetworkMode::None,
             limits: ResourceLimits::default(),
             uid: 1000,
             gid: 1000,

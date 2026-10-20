@@ -11,9 +11,9 @@ use std::process::Command;
 /// Falls back to in-process rlimits when the user systemd manager is not
 /// reachable (headless / non-systemd hosts).
 pub fn exec_with_limits(spec: &SandboxSpec) -> Result<()> {
-    // For Internet policy, pasta needs to run alongside bwrap in the same
+    // For Private policy, pasta needs to run alongside bwrap in the same
     // namespace plumbing. We build the command graph here.
-    if spec.network == crate::sandbox::spec::NetworkPolicy::Internet {
+    if spec.network == crate::sandbox::spec::NetworkMode::Private {
         return exec_with_pasta(spec);
     }
     let bwrap = bwrap::build_command(spec)?;
@@ -85,7 +85,7 @@ pub fn exec_with_pasta(spec: &SandboxSpec) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::spec::{NetworkPolicy, ResourceLimits, SandboxSpec};
+    use crate::sandbox::spec::{NetworkMode, ResourceLimits, SandboxSpec};
 
     fn spec() -> SandboxSpec {
         SandboxSpec {
@@ -95,7 +95,7 @@ mod tests {
             path_bins: vec![],
             executable: "/bin/true".into(),
             args: vec![],
-            network: NetworkPolicy::Disabled,
+            network: NetworkMode::None,
             limits: ResourceLimits::default(),
             uid: 1000,
             gid: 1000,

@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::sandbox::spec::{Mount, NetworkPolicy};
+use crate::sandbox::spec::{Mount, NetworkMode};
 use std::path::{Path, PathBuf};
 
 /// Generated sandbox-local `/etc` and shebang compatibility symlinks.
@@ -10,14 +10,14 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct GuestFs {
     root: tempfile::TempDir,
-    network: NetworkPolicy,
+    network: NetworkMode,
     closure: Vec<String>,
     uid: u32,
     gid: u32,
 }
 
 impl GuestFs {
-    pub fn new(network: NetworkPolicy, closure: Vec<String>, uid: u32, gid: u32) -> Result<Self> {
+    pub fn new(network: NetworkMode, closure: Vec<String>, uid: u32, gid: u32) -> Result<Self> {
         Ok(Self {
             root: tempfile::tempdir()?,
             network,
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn writes_host_free_etc() {
-        let g = GuestFs::new(NetworkPolicy::Disabled, vec![], 1000, 1000).unwrap();
+        let g = GuestFs::new(NetworkMode::None, vec![], 1000, 1000).unwrap();
         let mounts = g.mounts().unwrap();
         assert_eq!(targets(&mounts), vec!["/etc", "/bin", "/usr/bin"]);
 
@@ -193,7 +193,7 @@ mod tests {
         std::fs::write(store.path().join("bin/env"), "").unwrap();
         let closure = vec![store.path().display().to_string()];
 
-        let g = GuestFs::new(NetworkPolicy::Disabled, closure, 1000, 1000).unwrap();
+        let g = GuestFs::new(NetworkMode::None, closure, 1000, 1000).unwrap();
         let _ = g.mounts().unwrap();
         assert_eq!(
             std::fs::read_link(g.root.path().join("bin/sh")).unwrap(),
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn no_resolv_conf_copied_or_created() {
-        let g = GuestFs::new(NetworkPolicy::Internet, vec![], 1000, 1000).unwrap();
+        let g = GuestFs::new(NetworkMode::Private, vec![], 1000, 1000).unwrap();
         let _ = g.mounts().unwrap();
         // DNS not copied from host; backend provides connectivity
         assert!(g.root.path().join("etc/resolv.conf").exists());

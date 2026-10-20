@@ -11,23 +11,19 @@ pub enum Mount {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetworkPolicy {
-    /// No network namespace at all; fully offline (`--unshare-net`).
-    Disabled,
-    /// A private network namespace with loopback only; no host access.
-    Isolated,
-    /// A private network namespace that will be attached to an external
-    /// bridge/NAT (managed by the host, e.g. NixOS). Until attached, this
-    /// behaves like `Isolated`; the host must provide the veth/NAT path.
-    Internet,
+pub enum NetworkMode {
+    /// No network access.
+    None,
+    /// Private network namespace (isolated from host).
+    Private,
+    /// Share host network namespace.
+    Host,
 }
 
-impl NetworkPolicy {
-    /// Whether the sandbox may reach anything beyond an empty namespace.
-    /// `Disabled` is fully offline; `Isolated`/`Internet` need resolver and
-    /// CA files prepared for a network stack to be usable.
+impl NetworkMode {
+    /// Whether the sandbox has any network access beyond loopback semantics.
     pub fn has_network(self) -> bool {
-        !matches!(self, NetworkPolicy::Disabled)
+        matches!(self, NetworkMode::Private | NetworkMode::Host)
     }
 }
 
@@ -66,7 +62,7 @@ pub struct SandboxSpec {
     pub path_bins: Vec<PathBuf>,
     pub executable: PathBuf,
     pub args: Vec<String>,
-    pub network: NetworkPolicy,
+    pub network: NetworkMode,
     pub limits: ResourceLimits,
     pub uid: u32,
     pub gid: u32,
@@ -89,9 +85,9 @@ mod tests {
     }
 
     #[test]
-    fn network_policy_online_flag() {
-        assert!(!NetworkPolicy::Disabled.has_network());
-        assert!(NetworkPolicy::Isolated.has_network());
-        assert!(NetworkPolicy::Internet.has_network());
+    fn network_mode_flags() {
+        assert!(!NetworkMode::None.has_network());
+        assert!(NetworkMode::Private.has_network());
+        assert!(NetworkMode::Host.has_network());
     }
 }

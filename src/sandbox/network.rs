@@ -1,12 +1,11 @@
 //! Network backend selection and helpers.
 //!
-//! The network policy (Disabled/Isolated/Internet) is distinct from the
-//! mechanism used to provide connectivity (None/Pasta). For `Internet`,
-//! we use `pasta` to connect the sandbox's private network namespace to
-//! the host's networking without sharing the host network namespace.
+//! NetworkMode (None/Private/Host) defines semantics. For `Private`,
+//! we may use `pasta` to provide user-mode networking without sharing the
+//! host network namespace.
 
 use crate::error::{Error, Result};
-use crate::sandbox::spec::NetworkPolicy;
+use crate::sandbox::spec::NetworkMode;
 use std::path::PathBuf;
 
 /// Network connectivity backend.
@@ -18,11 +17,11 @@ pub enum NetworkBackend {
     Pasta,
 }
 
-/// Resolve which backend to use for the given policy.
-pub fn backend_for(policy: NetworkPolicy) -> NetworkBackend {
-    match policy {
-        NetworkPolicy::Disabled | NetworkPolicy::Isolated => NetworkBackend::None,
-        NetworkPolicy::Internet => NetworkBackend::Pasta,
+/// Resolve which backend to use for the given mode.
+pub fn backend_for(mode: NetworkMode) -> NetworkBackend {
+    match mode {
+        NetworkMode::None | NetworkMode::Host => NetworkBackend::None,
+        NetworkMode::Private => NetworkBackend::Pasta,
     }
 }
 
@@ -50,6 +49,6 @@ pub fn find_pasta() -> Option<PathBuf> {
 /// Ensure pasta is available if backend requires it.
 pub fn require_pasta() -> Result<PathBuf> {
     find_pasta().ok_or_else(|| {
-        Error::Bwrap("network policy \"internet\" requires pasta, but pasta was not found".into())
+        Error::Bwrap("network mode \"private\" requires pasta, but pasta was not found".into())
     })
 }

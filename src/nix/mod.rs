@@ -78,18 +78,18 @@ fn build_bwrap_spec(
 ) -> Result<SandboxSpec> {
     use crate::error::Error;
     use crate::sandbox::etc::GuestFs;
-    use crate::sandbox::spec::{Mount, NetworkPolicy, ResourceLimits, SandboxSpec};
+    use crate::sandbox::spec::{Mount, NetworkMode, ResourceLimits, SandboxSpec};
     use std::collections::HashSet;
     use std::path::PathBuf;
 
     let network = match cfg.network.as_deref() {
-        None => NetworkPolicy::Disabled,
-        Some("disabled") => NetworkPolicy::Disabled,
-        Some("isolated") => NetworkPolicy::Isolated,
-        Some("internet") => NetworkPolicy::Internet,
+        None => NetworkMode::None,
+        Some("none") => NetworkMode::None,
+        Some("private") => NetworkMode::Private,
+        Some("host") => NetworkMode::Host,
         Some(other) => {
             return Err(Error::Nix(format!(
-                "unknown network policy \"{other}\"; allowed: disabled, isolated, internet"
+                "unknown network mode \"{other}\"; allowed: none, private, host"
             )))
         }
     };
