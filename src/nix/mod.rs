@@ -76,9 +76,14 @@ fn build_bwrap_spec(
     closure_paths: &std::collections::HashSet<String>,
     cwd: std::path::PathBuf,
 ) -> Result<SandboxSpec> {
+    use crate::sandbox::etc::GuestFs;
     use crate::sandbox::spec::{Mount, NetworkPolicy, SandboxSpec};
     use std::collections::HashSet;
     use std::path::PathBuf;
+
+    let network = NetworkPolicy::Disabled;
+    let uid = 1000;
+    let gid = 1000;
 
     let mut mounts = Vec::new();
     // dirs
@@ -92,6 +97,9 @@ fn build_bwrap_spec(
         seen.insert(p.clone());
         mounts.push(Mount::ReadOnly { source: pb.clone(), target: pb });
     }
+    // sandbox-local /etc, /bin/sh and /usr/bin/env (host /etc,/bin,/usr never exposed)
+    let guest = GuestFs::new(network.clone(), closure_paths.iter().cloned().collect(), uid, gid)?;
+    mounts.extend(guest.mounts()?);
     // dirs
     mounts.push(Mount::Dir { target: PathBuf::from("/workspace") });
     mounts.push(Mount::Dir { target: PathBuf::from("/tmp") });
@@ -128,24 +136,13 @@ fn build_bwrap_spec(
         env.push((k.clone(), v.clone()));
     }
 
-    // choose executable: try to find a shell from PATH packages? or just /bin/sh? but we don't put /bin/sh - look for bash in packages
+    // default shell: bash from a package if available, else the guest /bin/sh
     let mut exe = PathBuf::from("/bin/sh");
     for pkg in &cfg.packages {
         let bash = PathBuf::from(&pkg.out).join("bin").join("bash");
         if bash.exists() {
             exe = bash;
             break;
-        }
-    }
-    // fallback: use first bin in path_bins
-    if !exe.to_string_lossy().contains("bash") && !path_bins.is_empty() {
-        // try to find bash
-    }
-    if exe == PathBuf::from("/bin/sh") {
-        // as last resort, pick first package's bin/sh if exists
-        for pkg in &cfg.packages {
-            let sh = PathBuf::from(&pkg.out).join("bin").join("sh");
-            if sh.exists() { exe = sh; break; }
         }
     }
 
@@ -160,6 +157,9 @@ fn build_bwrap_spec(
         path_bins,
         executable: exe,
         args: vec!["-i".to_string()],
-        network: NetworkPolicy::Disabled,
+        network,
+        uid,
+        gid,
+        keep_alive: vec![guest],
     })
 }

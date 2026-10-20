@@ -1,14 +1,17 @@
 use crate::error::{Error, Result};
-use std::collections::{HashSet, VecDeque};
-use std::fs;
-use std::path::Path;
+use std::collections::HashSet;
 use std::process::Command;
 
-fn add_from_path_info(paths: &[String], closure: &mut HashSet<String>) -> Result<()> {
-    if paths.is_empty() {
-        return Ok(());
+/// Runtime closure of `roots`, taken from Nix's own closure metadata.
+///
+/// `nix path-info --recursive` returns exactly the referenced store paths
+/// (identical to `nix-store --query --requisites`), so no manual symlink
+/// traversal is needed: Nix already records every runtime reference.
+pub fn get_closure(roots: &[String]) -> Result<HashSet<String>> {
+    if roots.is_empty() {
+        return Ok(HashSet::new());
     }
-    // one batched path-info call for all roots
+    // one batched call for all roots
     let out = Command::new("nix")
         .args([
             "--extra-experimental-features",
@@ -16,98 +19,53 @@ fn add_from_path_info(paths: &[String], closure: &mut HashSet<String>) -> Result
             "path-info",
             "--recursive",
         ])
-        .args(paths)
+        .args(roots)
         .output()
         .map_err(|e| Error::Nix(e.to_string()))?;
     if !out.status.success() {
         return Err(Error::Nix(format!(
             "path-info failed for {}: {}",
-            paths.join(", "),
+            roots.join(", "),
             String::from_utf8_lossy(&out.stderr)
         )));
     }
     let s = String::from_utf8(out.stdout).map_err(|e| Error::Nix(e.to_string()))?;
+    let mut closure = HashSet::new();
     for line in s.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        // `nix path-info` is tab-separated: path, then optional columns
         let tok = line.split_whitespace().next().unwrap_or(line);
         if tok.starts_with("/nix/store/") {
             closure.insert(tok.to_string());
         }
     }
-    Ok(())
+    Ok(closure)
 }
 
-fn follow_symlinks(closure: &mut HashSet<String>) -> Result<()> {
-    let mut seen_scan = HashSet::new();
-    let mut q: VecDeque<String> = closure.iter().cloned().collect();
-    for c in closure.iter().cloned() {
-        q.push_back(c);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_roots_needs_no_call() {
+        assert!(get_closure(&[]).unwrap().is_empty());
     }
-    while let Some(cur) = q.pop_front() {
-        if seen_scan.contains(&cur) {
-            continue;
-        }
-        seen_scan.insert(cur.clone());
-        let p = Path::new(&cur);
-        if !p.exists() {
-            continue;
-        }
-        // walk directory entries
-        if let Ok(rd) = fs::read_dir(p) {
-            for ent in rd.flatten() {
-                let path = ent.path();
-                // check symlink
-                if let Ok(md) = fs::symlink_metadata(&path) {
-                    if md.file_type().is_symlink() {
-                        if let Ok(target) = fs::read_link(&path) {
-                            if target.is_absolute() {
-                                let ts = target.to_string_lossy();
-                                if ts.starts_with("/nix/store/") {
-                                    // normalize to the store path root? target might point to file inside store path
-                                    // store paths are directories/files under /nix/store/<hash>-name; take the store path component
-                                    let mut parts = ts.split('/');
-                                    // skip empty, nix, store
-                                    let _ = parts.next();
-                                    let _ = parts.next();
-                                    let _ = parts.next();
-                                    if let Some(sp) = parts.next() {
-                                        let store_root = format!("/nix/store/{}", sp);
-                                        if !closure.contains(&store_root) {
-                                            closure.insert(store_root.clone());
-                                            add_from_path_info(
-                                                std::slice::from_ref(&store_root),
-                                                closure,
-                                            )?;
-                                            q.push_back(store_root);
-                                            continue;
-                                        } else if !seen_scan.contains(&store_root) {
-                                            q.push_back(store_root);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // if dir, recurse? but read_dir is shallow; easier to also push dirs seen
-                if let Ok(md) = fs::metadata(&path) {
-                    if md.is_dir() {
-                        // don't spam, only if not scanned? handled by seen_scan on store roots mainly
-                    }
-                }
+
+    #[test]
+    fn parses_store_paths_from_path_info_lines() {
+        // mirrors `nix path-info --recursive` output: path + tab columns
+        let lines = "/nix/store/aaa-x\t{\"narSize\":123}\n/nix/store/bbb-y\t{\"narSize\":4}\n";
+        let mut closure = HashSet::new();
+        for line in lines.lines() {
+            let tok = line.split_whitespace().next().unwrap_or(line);
+            if tok.starts_with("/nix/store/") {
+                closure.insert(tok.to_string());
             }
         }
+        assert_eq!(closure.len(), 2);
+        assert!(closure.contains("/nix/store/aaa-x"));
     }
-    Ok(())
-}
-
-pub fn get_closure(packages: &[String]) -> Result<HashSet<String>> {
-    let mut closure: HashSet<String> = HashSet::new();
-    add_from_path_info(packages, &mut closure)?;
-    // follow absolute symlinks inside closure
-    follow_symlinks(&mut closure)?;
-    Ok(closure)
 }

@@ -26,6 +26,10 @@ pub fn exec(spec: &SandboxSpec) -> Result<()> {
 
     cmd.arg("--clearenv");
 
+    // Match the generated /etc/passwd and /etc/group entries.
+    cmd.arg("--uid").arg(spec.uid.to_string());
+    cmd.arg("--gid").arg(spec.gid.to_string());
+
     // env
     for (k, v) in &spec.env {
         cmd.arg("--setenv").arg(k).arg(v);
