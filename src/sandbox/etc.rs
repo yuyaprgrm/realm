@@ -97,10 +97,10 @@ impl GuestFs {
             "passwd: files\ngroup: files\nshadow: files\nhosts: files dns\n",
         )?;
         if self.network.has_network() {
-            // Prefer the host resolver; fall back to a public one.
-            let resolv = std::fs::read_to_string("/etc/resolv.conf")
-                .unwrap_or_else(|_| "nameserver 1.1.1.1\n".to_string());
-            self.write("etc/resolv.conf", &resolv)?;
+            // DNS configuration is provided by the network backend (pasta). Do not
+            // copy the host's /etc/resolv.conf. Create an empty file so the
+            // backend can overwrite it if needed; we must not guess DNS servers.
+            self.write("etc/resolv.conf", "")?;
         }
         Ok(())
     }
@@ -206,9 +206,10 @@ mod tests {
     }
 
     #[test]
-    fn enables_resolver_when_network_up() {
+    fn no_resolv_conf_copied_or_created() {
         let g = GuestFs::new(NetworkPolicy::Internet, vec![], 1000, 1000).unwrap();
         let _ = g.mounts().unwrap();
+        // DNS not copied from host; backend provides connectivity
         assert!(g.root.path().join("etc/resolv.conf").exists());
     }
 }

@@ -1,8 +1,7 @@
-use std::os::unix::process::CommandExt;
-use std::process::Command;
-
 use crate::error::{Error, Result};
 use crate::sandbox::spec::{Mount, SandboxSpec};
+use std::os::unix::process::CommandExt;
+use std::process::Command;
 
 /// Build the bwrap command (without executing it). Shared by the plain path
 /// and the cgroup-wrapped path.
@@ -14,9 +13,14 @@ pub fn build_command(spec: &SandboxSpec) -> Result<Command> {
     cmd.arg("--unshare-user")
         .arg("--unshare-pid")
         .arg("--unshare-uts")
-        .arg("--unshare-ipc")
-        .arg("--unshare-net")
-        .arg("--unshare-cgroup-try")
+        .arg("--unshare-ipc");
+    // Network namespace: for Internet we rely on pasta-provided netns (pasta
+    // creates/runs in a netns); avoid creating a second isolated netns that
+    // would block connectivity.
+    if spec.network != crate::sandbox::spec::NetworkPolicy::Internet {
+        cmd.arg("--unshare-net");
+    }
+    cmd.arg("--unshare-cgroup-try")
         .arg("--die-with-parent")
         // Fresh terminal session: blocks TIOCSTI / controlling-tty injection.
         .arg("--new-session")

@@ -11,6 +11,11 @@ use std::process::Command;
 /// Falls back to in-process rlimits when the user systemd manager is not
 /// reachable (headless / non-systemd hosts).
 pub fn exec_with_limits(spec: &SandboxSpec) -> Result<()> {
+    // For Internet policy, pasta needs to run alongside bwrap in the same
+    // namespace plumbing. We build the command graph here.
+    if spec.network == crate::sandbox::spec::NetworkPolicy::Internet {
+        return exec_with_pasta(spec);
+    }
     let bwrap = bwrap::build_command(spec)?;
 
     let mut cmd = if systemd_user_scope_available() {
@@ -59,6 +64,22 @@ fn systemd_user_scope_available() -> bool {
         || std::env::var_os("XDG_RUNTIME_DIR")
             .map(|d| std::path::Path::new(&d).join("systemd/private").exists())
             .unwrap_or(false)
+}
+
+/// Attach pasta to provide network connectivity for Internet policy.
+pub fn exec_with_pasta(spec: &SandboxSpec) -> Result<()> {
+    let pasta_path = crate::sandbox::network::require_pasta()?;
+    let bwrap_cmd = bwrap::build_command(spec)?;
+    let mut pasta = Command::new(&pasta_path);
+    // Run bwrap under pasta's network namespace
+    pasta.arg("--");
+    pasta.arg(bwrap_cmd.get_program());
+    for a in bwrap_cmd.get_args() {
+        pasta.arg(a);
+    }
+    let mut cmd = pasta;
+    let err = cmd.exec();
+    Err(Error::Bwrap(format!("exec failed: {}", err)))
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ pub mod backend;
 pub mod bwrap;
 pub mod cgroup;
 pub mod etc;
+pub mod network;
 pub mod spec;
 
 use crate::error::{Error, Result};
@@ -19,5 +20,5 @@ pub fn run(flake_ref: &str, command: &[String]) -> Result<()> {
         spec.executable = std::path::PathBuf::from(&command[0]);
         spec.args = command[1..].to_vec();
     }
-    backend::BwrapBackend::default().exec(&spec)
+    backend::BwrapBackend.exec(&spec)
 }
