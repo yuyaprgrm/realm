@@ -50,6 +50,8 @@
             env = {
               FOO = "bar";
             };
+            # Network policy: "disabled" (default, fully offline), "isolated" (loopback only), "internet" (future veth/bridge/NAT)
+            network = "disabled";
           };
         }
       );

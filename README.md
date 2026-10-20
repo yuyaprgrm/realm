@@ -23,6 +23,23 @@ sandbox <FLAKE_REF> [-- command...]
 
 The flake's `sandbox.<system>.<name>` output (or equivalent) defines packages and environment variables for the sandboxed session. The agent command runs under a hardened bwrap setup with resource limits.
 
+### Example flake configuration
+
+```nix
+{
+  sandboxes = {
+    x86_64-linux.agent = {
+      packages = [ pkgs.bash pkgs.coreutils pkgs.git ];
+      env = { FOO = "bar"; };
+      network = "disabled"; # "disabled" | "isolated" | "internet"
+    };
+  };
+}
+```
+
+`network` defaults to `"disabled"` if unspecified (fully offline).
+The agent command runs under a hardened bwrap setup with resource limits.
+
 ## Platform support
 
 - **Runtime sandboxing:** Linux only.

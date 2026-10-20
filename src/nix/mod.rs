@@ -76,12 +76,23 @@ fn build_bwrap_spec(
     closure_paths: &std::collections::HashSet<String>,
     cwd: std::path::PathBuf,
 ) -> Result<SandboxSpec> {
+    use crate::error::Error;
     use crate::sandbox::etc::GuestFs;
     use crate::sandbox::spec::{Mount, NetworkPolicy, ResourceLimits, SandboxSpec};
     use std::collections::HashSet;
     use std::path::PathBuf;
 
-    let network = NetworkPolicy::Disabled;
+    let network = match cfg.network.as_deref() {
+        None => NetworkPolicy::Disabled,
+        Some("disabled") => NetworkPolicy::Disabled,
+        Some("isolated") => NetworkPolicy::Isolated,
+        Some("internet") => NetworkPolicy::Internet,
+        Some(other) => {
+            return Err(Error::Nix(format!(
+                "unknown network policy \"{other}\"; allowed: disabled, isolated, internet"
+            )))
+        }
+    };
     let limits = ResourceLimits::default();
     let uid = 1000;
     let gid = 1000;

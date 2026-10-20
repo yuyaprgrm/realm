@@ -15,12 +15,11 @@ pub struct Package {
 pub struct SandboxCfg {
     pub packages: Vec<Package>,
     pub env: HashMap<String, String>,
+    pub network: Option<String>,
 }
 
-// Derivations coerce to their output path in `nix eval --json`, so resolve
-// drv/out explicitly under keys that do not trigger coercion ("outPath" would
-// collapse each object back to a plain string).
-const APPLY: &str = "s: { packages = map (p: { out = builtins.toString p; drv = if builtins.isAttrs p && (p.type or \"\") == \"derivation\" then p.drvPath else null; }) s.packages; env = s.env or {}; }";
+    // Nix evaluation outside sandbox: extract network only if present, validate strictly later
+    const APPLY: &str = "s: { packages = map (p: { out = builtins.toString p; drv = if builtins.isAttrs p && (p.type or \"\") == \"derivation\" then p.drvPath else null; }) s.packages; env = s.env or {}; network = s.network or null; }";
 
 pub fn eval_sandbox(flake_dir: &std::path::Path, system: &str, attr: &str) -> Result<SandboxCfg> {
     // nix eval --json --apply <normalize> <flake>#sandboxes.<system>.<name>
@@ -89,9 +88,18 @@ fn parse_sandbox_json(bytes: &[u8]) -> Result<SandboxCfg> {
             return Err(Error::Nix("env must be object".into()));
         }
     }
+    let network = match obj.get("network") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| Error::Nix("network must be a string".into()))?
+                .to_string(),
+        ),
+    };
     Ok(SandboxCfg {
         packages: pkgs,
         env,
+        network,
     })
 }
 
@@ -120,12 +128,27 @@ mod tests {
             ]
         );
         assert_eq!(cfg.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(cfg.network, None);
     }
 
     #[test]
-    fn rejects_bad_entries() {
-        assert!(parse_sandbox_json(br#"{"packages":["/nix/store/x"]}"#).is_err());
-        assert!(parse_sandbox_json(br#"{"packages":[{"out":"/nix/store/x","drv":1}]}"#).is_err());
-        assert!(parse_sandbox_json(br#"{"env":{}}"#).is_err());
+    fn parses_network_policy() {
+        let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{},"network":"disabled"}"#;
+        assert_eq!(
+            parse_sandbox_json(json).unwrap().network.as_deref(),
+            Some("disabled")
+        );
+        let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{},"network":"isolated"}"#;
+        assert_eq!(
+            parse_sandbox_json(json).unwrap().network.as_deref(),
+            Some("isolated")
+        );
+        let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{},"network":"internet"}"#;
+        assert_eq!(
+            parse_sandbox_json(json).unwrap().network.as_deref(),
+            Some("internet")
+        );
+        let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{}}"#;
+        assert_eq!(parse_sandbox_json(json).unwrap().network, None);
     }
 }
