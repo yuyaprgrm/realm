@@ -27,6 +27,8 @@
               clippy
               rustc
               rustfmt
+
+              passt
             ];
           };
         }
@@ -39,19 +41,20 @@
         in
         {
           agent = {
-            packages = [
-              pkgs.bash
-              pkgs.coreutils
-              pkgs.git
-              pkgs.ripgrep
-              pkgs.fd
-              pkgs.opencode
+            packages = with pkgs; [
+              bash
+              coreutils
+              git
+              ripgrep
+              fd
+              opencode
+              curl
             ];
             env = {
               FOO = "bar";
             };
             # Network policy: "disabled" (default, fully offline), "isolated" (loopback only), "internet" (future veth/bridge/NAT)
-            network = "disabled";
+            network = "internet";
           };
         }
       );

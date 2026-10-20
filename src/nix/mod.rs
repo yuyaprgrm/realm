@@ -13,21 +13,18 @@ pub fn build_spec(flake_ref: &str) -> Result<SandboxSpec> {
     realize::realize_packages(&sandbox_cfg.packages)?;
     let out_paths: Vec<String> = sandbox_cfg.packages.iter().map(|p| p.out.clone()).collect();
     let closure_paths = closure::get_closure(&out_paths)?;
-    Ok(build_bwrap_spec(
+    build_bwrap_spec(
         &sandbox_cfg,
         &closure_paths,
         std::env::current_dir()?,
-    )?)
+    )
 }
 
 fn parse_flake_ref(flake_ref: &str) -> Result<(std::path::PathBuf, String)> {
     if let Some((left, right)) = flake_ref.split_once('#') {
-        let dir = if left.is_empty() {
-            ".".to_string()
-        } else if left == "." {
+        let dir = if left.is_empty() || left == "." {
             ".".to_string()
         } else {
-            // allow path/to/flake or ./path/to/flake
             left.to_string()
         };
         let p = std::path::PathBuf::from(dir);
@@ -68,7 +65,7 @@ fn current_system() -> Result<String> {
         };
         return Ok(sys);
     }
-    Ok(String::from_utf8(out.stdout).map_err(|e| crate::error::Error::Nix(e.to_string()))?)
+    String::from_utf8(out.stdout).map_err(|e| crate::error::Error::Nix(e.to_string()))
 }
 
 fn build_bwrap_spec(
