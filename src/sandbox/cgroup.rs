@@ -2,21 +2,46 @@ use crate::error::{Error, Result};
 use crate::sandbox::bwrap;
 use crate::sandbox::spec::SandboxSpec;
 use std::os::unix::process::CommandExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Run the sandbox, applying resource limits via a transient systemd scope
-/// (`systemd-run --user --scope`) when available. This gives real cgroup v2
-/// enforcement of memory/CPU/task counts the way bwrap alone cannot.
-///
-/// Falls back to in-process rlimits when the user systemd manager is not
-/// reachable (headless / non-systemd hosts).
+/// (`systemd-run --user --scope`) when available.
 pub fn exec_with_limits(spec: &SandboxSpec) -> Result<()> {
-    // For Private policy, pasta needs to run alongside bwrap in the same
-    // namespace plumbing. We build the command graph here.
-    if spec.network == crate::sandbox::spec::NetworkMode::Private {
-        return exec_with_pasta(spec);
-    }
     let bwrap = bwrap::build_command(spec)?;
+
+    if spec.network == crate::sandbox::spec::NetworkMode::Private {
+        let pasta_path = crate::sandbox::network::require_pasta()?;
+        // pasta starts in the background and configures a user/network namespace
+        // for its caller. Run it inside the scope, then have bwrap join that
+        // namespace instead of creating a disconnected one of its own.
+        let mut pasta = Command::new(pasta_path);
+        pasta
+            .arg("--foreground")
+            .arg("--quiet")
+            .arg("--config-net")
+            .arg("--ipv4-only")
+            .arg("--address")
+            .arg(crate::sandbox::network::PASTA_ADDRESS)
+            .arg("--gateway")
+            .arg(crate::sandbox::network::PASTA_GATEWAY)
+            .arg("--dns-forward")
+            .arg(crate::sandbox::network::PASTA_DNS_FORWARD);
+        pasta.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        let mut helper = Command::new("/bin/sh");
+        helper.arg("-c").arg("exec \"$@\"").arg("realm-pasta");
+        helper.arg(bwrap.get_program());
+        helper.args(bwrap.get_args());
+        pasta.arg(helper.get_program()).args(helper.get_args());
+
+        let mut cmd = if systemd_user_scope_available() {
+            systemd_wrapper(spec, &pasta)
+        } else {
+            bwrap::apply_rlimits(&mut pasta, spec);
+            pasta
+        };
+        let err = cmd.exec();
+        return Err(Error::Bwrap(format!("exec failed: {}", err)));
+    }
 
     let mut cmd = if systemd_user_scope_available() {
         systemd_wrapper(spec, &bwrap)
@@ -66,22 +91,6 @@ fn systemd_user_scope_available() -> bool {
             .unwrap_or(false)
 }
 
-/// Attach pasta to provide network connectivity for Internet policy.
-pub fn exec_with_pasta(spec: &SandboxSpec) -> Result<()> {
-    let pasta_path = crate::sandbox::network::require_pasta()?;
-    let bwrap_cmd = bwrap::build_command(spec)?;
-    let mut pasta = Command::new(&pasta_path);
-    // Run bwrap under pasta's network namespace
-    pasta.arg("--");
-    pasta.arg(bwrap_cmd.get_program());
-    for a in bwrap_cmd.get_args() {
-        pasta.arg(a);
-    }
-    let mut cmd = pasta;
-    let err = cmd.exec();
-    Err(Error::Bwrap(format!("exec failed: {}", err)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +136,29 @@ mod tests {
         let mut s = spec();
         s.limits.timeout_secs = Some(60);
         assert!(wrapper_args(&s).contains(&"RuntimeMaxSec=60".to_string()));
+    }
+
+    #[test]
+    fn systemd_wrapper_keeps_pasta_inside_the_limited_scope() {
+        let mut s = spec();
+        s.network = NetworkMode::Private;
+        s.limits.timeout_secs = Some(45);
+        let pasta = Command::new("/nix/store/passt/bin/pasta");
+        let args = wrapper_args_for(&s, &pasta);
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("/nix/store/passt/bin/pasta")
+        );
+        assert!(args.contains(&"MemoryMax=2147483648".to_string()));
+        assert!(args.contains(&"CPUQuota=100%".to_string()));
+        assert!(args.contains(&"TasksMax=512".to_string()));
+        assert!(args.contains(&"RuntimeMaxSec=45".to_string()));
+    }
+
+    fn wrapper_args_for(s: &SandboxSpec, program: &Command) -> Vec<String> {
+        systemd_wrapper(s, program)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
     }
 }

@@ -9,25 +9,25 @@ pub fn build_command(spec: &SandboxSpec) -> Result<Command> {
     let bwrap = which::which("bwrap").map_err(|e| Error::Bwrap(e.to_string()))?;
 
     let mut cmd = Command::new(&bwrap);
-    // Isolation: new user/pid/uts/ipc/net namespaces and private cgroup ns.
+    // Isolation: new user/pid/uts/ipc namespaces and private cgroup ns.
     cmd.arg("--unshare-user")
         .arg("--unshare-pid")
         .arg("--unshare-uts")
         .arg("--unshare-ipc");
-    // Network namespace: share host netns only if NetworkMode::Host
-    if spec.network != crate::sandbox::spec::NetworkMode::Host {
+    // Network namespace: only unshare for None; Private inherits pasta's netns,
+    // Host retains the caller's network namespace.
+    if spec.network == crate::sandbox::spec::NetworkMode::None {
         cmd.arg("--unshare-net");
     }
     cmd.arg("--unshare-cgroup-try")
         .arg("--die-with-parent")
         // Fresh terminal session: blocks TIOCSTI / controlling-tty injection.
         .arg("--new-session")
-        // No nested user namespaces: removes a large privilege-escalation
-        // surface (requires --unshare-user, which we always set).
+        // No nested user namespaces: this bwrap invocation creates its own.
         .arg("--disable-userns");
 
-    // Network policy: every policy gets a private netns (--unshare-net above).
-    // Disabled leaves it empty; Isolated/Internet are wired by the host later.
+    // Network policy: None gets an empty namespace; Private inherits the
+    // namespace created and connected by pasta; Host inherits the host netns.
 
     cmd.arg("--clearenv");
 
@@ -143,8 +143,8 @@ mod tests {
         }
     }
 
-    fn args() -> Vec<String> {
-        build_command(&spec())
+    fn args_with(s: &SandboxSpec) -> Vec<String> {
+        build_command(s)
             .unwrap()
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -153,7 +153,9 @@ mod tests {
 
     #[test]
     fn build_command_applies_hardening() {
-        let a = args();
+        let mut s = spec();
+        s.network = crate::sandbox::spec::NetworkMode::None;
+        let a = args_with(&s);
         for flag in [
             "--unshare-user",
             "--unshare-pid",
@@ -171,5 +173,28 @@ mod tests {
         assert!(a.contains(&"--dev".to_string()));
         // tmpfs size comes from limits
         assert!(a.contains(&"536870912".to_string()));
+    }
+
+    #[test]
+    fn network_modes_select_the_expected_namespace() {
+        use crate::sandbox::spec::NetworkMode;
+
+        let mut s = spec();
+        for (mode, should_unshare) in [
+            (NetworkMode::None, true),
+            (NetworkMode::Private, false),
+            (NetworkMode::Host, false),
+        ] {
+            s.network = mode;
+            assert_eq!(
+                args_with(&s).contains(&"--unshare-net".to_string()),
+                should_unshare,
+                "unexpected --unshare-net for {mode:?}"
+            );
+        }
+        s.network = NetworkMode::Private;
+        let private_args = args_with(&s);
+        assert!(private_args.contains(&"--unshare-user".to_string()));
+        assert!(private_args.contains(&"--disable-userns".to_string()));
     }
 }

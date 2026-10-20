@@ -8,6 +8,12 @@ use crate::error::{Error, Result};
 use crate::sandbox::spec::NetworkMode;
 use std::path::PathBuf;
 
+/// Private IPv4 network configured by pasta for `NetworkMode::Private`.
+pub const PASTA_ADDRESS: &str = "10.0.2.100/24";
+pub const PASTA_GATEWAY: &str = "10.0.2.2";
+/// Address exposed inside the pasta namespace as its DNS forwarding endpoint.
+pub const PASTA_DNS_FORWARD: &str = "10.0.2.3";
+
 /// Network connectivity backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkBackend {
@@ -34,9 +40,8 @@ pub fn find_pasta() -> Option<PathBuf> {
         // passt provides pasta in some builds; but we specifically want pasta
     }
     // Common Nix store paths seen in this environment
-    let candidates = &[
-        "/nix/store/dcyh5h3mz00xcwxg9w2mgzd1fby2psx6-passt-2026_07_16.090d739/bin/pasta",
-    ];
+    let candidates =
+        &["/nix/store/dcyh5h3mz00xcwxg9w2mgzd1fby2psx6-passt-2026_07_16.090d739/bin/pasta"];
     for c in candidates {
         let p = PathBuf::from(c);
         if p.exists() {

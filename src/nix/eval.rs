@@ -18,8 +18,8 @@ pub struct SandboxCfg {
     pub network: Option<String>,
 }
 
-    // Nix evaluation outside sandbox: extract network only if present, validate strictly later
-    const APPLY: &str = "s: { packages = map (p: { out = builtins.toString p; drv = if builtins.isAttrs p && (p.type or \"\") == \"derivation\" then p.drvPath else null; }) s.packages; env = s.env or {}; network = s.network or null; }";
+// Nix evaluation outside sandbox: extract network only if present, validate strictly later
+const APPLY: &str = "s: { packages = map (p: { out = builtins.toString p; drv = if builtins.isAttrs p && (p.type or \"\") == \"derivation\" then p.drvPath else null; }) s.packages; env = s.env or {}; network = s.network or null; }";
 
 pub fn eval_sandbox(flake_dir: &std::path::Path, system: &str, attr: &str) -> Result<SandboxCfg> {
     // nix eval --json --apply <normalize> <flake>#sandboxes.<system>.<name>

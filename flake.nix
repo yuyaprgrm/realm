@@ -49,11 +49,45 @@
               fd
               opencode
               curl
+              cacert
             ];
             env = {
               FOO = "bar";
             };
             network = "private";
+          };
+          none-test = {
+            packages = with pkgs; [
+              bash
+              coreutils
+              curl
+              procps
+              cacert
+            ];
+            env = { };
+            network = "none";
+          };
+          private-test = {
+            packages = with pkgs; [
+              bash
+              coreutils
+              curl
+              procps
+              cacert
+            ];
+            env = { };
+            network = "private";
+          };
+          host-test = {
+            packages = with pkgs; [
+              bash
+              coreutils
+              curl
+              procps
+              cacert
+            ];
+            env = { };
+            network = "host";
           };
         }
       );

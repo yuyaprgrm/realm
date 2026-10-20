@@ -97,10 +97,15 @@ impl GuestFs {
             "passwd: files\ngroup: files\nshadow: files\nhosts: files dns\n",
         )?;
         if self.network.has_network() {
-            // DNS configuration is provided by the network backend (pasta). Do not
-            // copy the host's /etc/resolv.conf. Create an empty file so the
-            // backend can overwrite it if needed; we must not guess DNS servers.
-            self.write("etc/resolv.conf", "")?;
+            let resolv_conf = match self.network {
+                NetworkMode::Private => format!(
+                    "nameserver {}\n",
+                    crate::sandbox::network::PASTA_DNS_FORWARD
+                ),
+                NetworkMode::Host => host_nameservers(),
+                NetworkMode::None => String::new(),
+            };
+            self.write("etc/resolv.conf", &resolv_conf)?;
         }
         Ok(())
     }
@@ -157,6 +162,17 @@ impl GuestFs {
     }
 }
 
+/// Copy only nameserver directives for Host mode, without exposing other host
+/// resolver configuration such as search domains or options.
+fn host_nameservers() -> String {
+    std::fs::read_to_string("/etc/resolv.conf")
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.trim_start().starts_with("nameserver "))
+        .map(|line| format!("{}\n", line.trim()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,7 +225,13 @@ mod tests {
     fn no_resolv_conf_copied_or_created() {
         let g = GuestFs::new(NetworkMode::Private, vec![], 1000, 1000).unwrap();
         let _ = g.mounts().unwrap();
-        // DNS not copied from host; backend provides connectivity
-        assert!(g.root.path().join("etc/resolv.conf").exists());
+        // Private DNS uses pasta's synthetic forwarding address.
+        assert_eq!(
+            std::fs::read_to_string(g.root.path().join("etc/resolv.conf")).unwrap(),
+            format!(
+                "nameserver {}\n",
+                crate::sandbox::network::PASTA_DNS_FORWARD
+            )
+        );
     }
 }

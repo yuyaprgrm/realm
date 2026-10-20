@@ -13,11 +13,7 @@ pub fn build_spec(flake_ref: &str) -> Result<SandboxSpec> {
     realize::realize_packages(&sandbox_cfg.packages)?;
     let out_paths: Vec<String> = sandbox_cfg.packages.iter().map(|p| p.out.clone()).collect();
     let closure_paths = closure::get_closure(&out_paths)?;
-    build_bwrap_spec(
-        &sandbox_cfg,
-        &closure_paths,
-        std::env::current_dir()?,
-    )
+    build_bwrap_spec(&sandbox_cfg, &closure_paths, std::env::current_dir()?)
 }
 
 fn parse_flake_ref(flake_ref: &str) -> Result<(std::path::PathBuf, String)> {
@@ -30,7 +26,9 @@ fn parse_flake_ref(flake_ref: &str) -> Result<(std::path::PathBuf, String)> {
         let p = std::path::PathBuf::from(dir);
         Ok((p.canonicalize().unwrap_or(p), right.to_string()))
     } else {
-        Err(crate::error::Error::Nix("flake ref must be <flake>#<name>".into()))
+        Err(crate::error::Error::Nix(
+            "flake ref must be <flake>#<name>".into(),
+        ))
     }
 }
 
@@ -53,9 +51,14 @@ fn current_system() -> Result<String> {
             .output()
             .map_err(|e| crate::error::Error::Nix(e.to_string()))?;
         if !out2.status.success() {
-            return Err(crate::error::Error::Nix(String::from_utf8_lossy(&out.stderr).into()));
+            return Err(crate::error::Error::Nix(
+                String::from_utf8_lossy(&out.stderr).into(),
+            ));
         }
-        let m = String::from_utf8(out2.stdout).unwrap_or_default().trim().to_string();
+        let m = String::from_utf8(out2.stdout)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         let sys = if m == "x86_64" {
             "x86_64-linux".to_string()
         } else if m == "aarch64" {
@@ -87,7 +90,7 @@ fn build_bwrap_spec(
         Some(other) => {
             return Err(Error::Nix(format!(
                 "unknown network mode \"{other}\"; allowed: none, private, host"
-            )))
+            )));
         }
     };
     let limits = ResourceLimits::default();
@@ -96,27 +99,49 @@ fn build_bwrap_spec(
 
     let mut mounts = Vec::new();
     // dirs
-    mounts.push(Mount::Dir { target: PathBuf::from("/nix") });
-    mounts.push(Mount::Dir { target: PathBuf::from("/nix/store") });
+    mounts.push(Mount::Dir {
+        target: PathBuf::from("/nix"),
+    });
+    mounts.push(Mount::Dir {
+        target: PathBuf::from("/nix/store"),
+    });
     // bind closure paths readonly
     let mut seen = HashSet::new();
     for p in closure_paths {
         let pb = PathBuf::from(p);
-        if seen.contains(p) { continue; }
+        if seen.contains(p) {
+            continue;
+        }
         seen.insert(p.clone());
-        mounts.push(Mount::ReadOnly { source: pb.clone(), target: pb });
+        mounts.push(Mount::ReadOnly {
+            source: pb.clone(),
+            target: pb,
+        });
     }
     // sandbox-local /etc, /bin/sh and /usr/bin/env (host /etc,/bin,/usr never exposed)
     let guest = GuestFs::new(network, closure_paths.iter().cloned().collect(), uid, gid)?;
     mounts.extend(guest.mounts()?);
     // dirs
-    mounts.push(Mount::Dir { target: PathBuf::from("/workspace") });
-    mounts.push(Mount::Dir { target: PathBuf::from("/tmp") });
-    mounts.push(Mount::Tmpfs { target: PathBuf::from("/tmp") });
-    mounts.push(Mount::Proc { target: PathBuf::from("/proc") });
-    mounts.push(Mount::Dev { target: PathBuf::from("/dev") });
+    mounts.push(Mount::Dir {
+        target: PathBuf::from("/workspace"),
+    });
+    mounts.push(Mount::Dir {
+        target: PathBuf::from("/tmp"),
+    });
+    mounts.push(Mount::Tmpfs {
+        target: PathBuf::from("/tmp"),
+    });
+    mounts.push(Mount::Proc {
+        target: PathBuf::from("/proc"),
+    });
+    mounts.push(Mount::Dev {
+        target: PathBuf::from("/dev"),
+    });
     // workspace rw
-    mounts.push(Mount::ReadWrite { source: cwd.clone(), target: PathBuf::from("/workspace") });
+    mounts.push(Mount::ReadWrite {
+        source: cwd.clone(),
+        target: PathBuf::from("/workspace"),
+    });
 
     // env
     let mut env = Vec::new();
@@ -155,9 +180,15 @@ fn build_bwrap_spec(
         }
     }
 
-    mounts.push(Mount::Dir { target: PathBuf::from("/home") });
-    mounts.push(Mount::Dir { target: PathBuf::from("/home/sandbox") });
-    mounts.push(Mount::Tmpfs { target: PathBuf::from("/home/sandbox") });
+    mounts.push(Mount::Dir {
+        target: PathBuf::from("/home"),
+    });
+    mounts.push(Mount::Dir {
+        target: PathBuf::from("/home/sandbox"),
+    });
+    mounts.push(Mount::Tmpfs {
+        target: PathBuf::from("/home/sandbox"),
+    });
 
     Ok(SandboxSpec {
         mounts,
