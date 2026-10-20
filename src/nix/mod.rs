@@ -77,11 +77,12 @@ fn build_bwrap_spec(
     cwd: std::path::PathBuf,
 ) -> Result<SandboxSpec> {
     use crate::sandbox::etc::GuestFs;
-    use crate::sandbox::spec::{Mount, NetworkPolicy, SandboxSpec};
+    use crate::sandbox::spec::{Mount, NetworkPolicy, ResourceLimits, SandboxSpec};
     use std::collections::HashSet;
     use std::path::PathBuf;
 
     let network = NetworkPolicy::Disabled;
+    let limits = ResourceLimits::default();
     let uid = 1000;
     let gid = 1000;
 
@@ -98,7 +99,7 @@ fn build_bwrap_spec(
         mounts.push(Mount::ReadOnly { source: pb.clone(), target: pb });
     }
     // sandbox-local /etc, /bin/sh and /usr/bin/env (host /etc,/bin,/usr never exposed)
-    let guest = GuestFs::new(network.clone(), closure_paths.iter().cloned().collect(), uid, gid)?;
+    let guest = GuestFs::new(network, closure_paths.iter().cloned().collect(), uid, gid)?;
     mounts.extend(guest.mounts()?);
     // dirs
     mounts.push(Mount::Dir { target: PathBuf::from("/workspace") });
@@ -158,6 +159,7 @@ fn build_bwrap_spec(
         executable: exe,
         args: vec!["-i".to_string()],
         network,
+        limits,
         uid,
         gid,
         keep_alive: vec![guest],

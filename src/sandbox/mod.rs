@@ -1,4 +1,5 @@
 pub mod bwrap;
+pub mod cgroup;
 pub mod etc;
 pub mod spec;
 
@@ -11,5 +12,5 @@ pub fn run(flake_ref: &str, command: &[String]) -> Result<()> {
         spec.executable = std::path::PathBuf::from(&command[0]);
         spec.args = command[1..].to_vec();
     }
-    crate::sandbox::bwrap::exec(&spec)
+    crate::sandbox::cgroup::exec_with_limits(&spec)
 }

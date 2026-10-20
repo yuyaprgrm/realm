@@ -56,7 +56,7 @@ impl GuestFs {
             },
         ];
         // CA certs only when networking is enabled and a CA store path exists.
-        if self.network == NetworkPolicy::Enabled
+        if self.network.has_network()
             && let Some(ca) = self.find_ca_bundle()
         {
             let ssl = root.join("etc/ssl/certs");
@@ -96,7 +96,7 @@ impl GuestFs {
             "etc/nsswitch.conf",
             "passwd: files\ngroup: files\nshadow: files\nhosts: files dns\n",
         )?;
-        if self.network == NetworkPolicy::Enabled {
+        if self.network.has_network() {
             // Prefer the host resolver; fall back to a public one.
             let resolv = std::fs::read_to_string("/etc/resolv.conf")
                 .unwrap_or_else(|_| "nameserver 1.1.1.1\n".to_string());
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn enables_resolver_when_network_up() {
-        let g = GuestFs::new(NetworkPolicy::Enabled, vec![], 1000, 1000).unwrap();
+        let g = GuestFs::new(NetworkPolicy::Internet, vec![], 1000, 1000).unwrap();
         let _ = g.mounts().unwrap();
         assert!(g.root.path().join("etc/resolv.conf").exists());
     }

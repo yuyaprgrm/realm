@@ -44,6 +44,8 @@
               pkgs.coreutils
               pkgs.git
               pkgs.ripgrep
+              pkgs.fd
+              pkgs.opencode
             ];
             env = {
               FOO = "bar";
