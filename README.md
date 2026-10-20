@@ -1,46 +1,95 @@
 # realm
 
-Nix-native sandbox runtime for executing agent workloads in an isolated Linux environment.
-
-## Security model
-
-The sandbox isolates only the **untrusted agent process tree**. Nix evaluation, build, realization, and closure calculation run **outside** the sandbox and trust the provided configuration.
-
-See [SECURITY.md](SECURITY.md) for the complete trust boundary and threat model.
+`realm` is a Nix-native Linux sandbox runtime for agent workloads. It reads
+sandbox definitions from `realm.nix`; Nix evaluates the configuration and
+realizes its package closure outside the sandbox. Bubblewrap contains only the
+agent process tree. See [SECURITY.md](SECURITY.md) for the trust boundary and
+threat model.
 
 ## Requirements
 
-- **Linux only.** The runtime requires bubblewrap, Linux namespaces, and cgroup v2. On non-Linux hosts, the CLI returns a clear error.
-- **Nix** (for evaluating the flake and obtaining runtime closures)
-- **bubblewrap** (`bwrap`)
-- **systemd** (optional but recommended: enables cgroup v2 limits via transient user scope)
+- Linux with user, PID, mount, and network namespaces enabled.
+- Nix with flakes enabled.
+- A `nixpkgs` flake registry entry (the default Nix registry normally provides
+  one) so Nix can evaluate package names in `realm.nix`.
+- bubblewrap (`bwrap`). The Nix package and development shell provide it.
+- A systemd user manager for `private` networking and cgroup resource limits.
+  Private mode also needs `pasta` on `PATH`; the Nix package provides it.
 
-## Usage
+## Install and run
+
+Install the published flake package into the current Nix profile:
 
 ```bash
-sandbox <FLAKE_REF> [-- command...]
+nix profile install github:yuyaprgrm/realm
+realm --help
 ```
 
-The flake's `sandbox.<system>.<name>` output (or equivalent) defines packages and environment variables for the sandboxed session. The agent command runs under a hardened bwrap setup with resource limits.
+Run directly from a local checkout without installing:
 
-### Example flake configuration
+```bash
+nix run . -- --help
+nix run . -- agent
+nix run . -- agent -- bash -lc 'curl https://example.com'
+```
+
+By default, Realm reads `realm.nix` from the current directory. Select a named
+sandbox with `realm <name>` and optionally pass another config file with
+`--config` / `-c`. The file is a Nix function returning a set of sandbox
+definitions. By default it gets Nixpkgs from the `nixpkgs` flake registry entry
+and creates `pkgs` for the current system:
 
 ```nix
+{ nixpkgs ? builtins.getFlake "nixpkgs"
+, system ? builtins.currentSystem
+}:
+let pkgs = import nixpkgs.sourceInfo.outPath { inherit system; };
+in
 {
-  sandboxes = {
-    x86_64-linux.agent = {
-      packages = [ pkgs.bash pkgs.coreutils pkgs.git ];
-      env = { FOO = "bar"; };
-      network = "disabled"; # "disabled" | "isolated" | "internet"
-    };
+  agent = {
+    packages = with pkgs; [ bash coreutils curl cacert ];
+    env = { FOO = "bar"; };
+    network = "private"; # "none", "private", or "host"
   };
 }
 ```
 
-`network` defaults to `"disabled"` if unspecified (fully offline).
-The agent command runs under a hardened bwrap setup with resource limits.
+Nix still evaluates package derivations, realizes them, and calculates their
+runtime closure. The sandbox configuration no longer needs to be a flake output.
+Use `realm --config ./ci/realm.nix agent` to select a different file.
 
-## Platform support
+`none` has no network interface or route. `private` gives the agent an isolated
+network namespace with pasta-based DNS and Internet access; it cannot reach
+services bound to host localhost. `host` shares the host network namespace.
+Private mode runs inside a transient systemd user scope with defaults of 2 GiB
+memory, 100% of one CPU, 512 tasks, and a one-hour wall-clock limit. A usable
+systemd user manager is required for this mode.
 
-- **Runtime sandboxing:** Linux only.
-- **Nix flake outputs:** may include non-Linux targets (for evaluation/build convenience) — these do not imply runtime support on those platforms.
+Add `cacert` to the sandbox package list for HTTPS clients that need trusted CA
+certificates. Pin or override the `nixpkgs` argument in `realm.nix` if you need a
+different package set.
+
+## Development
+
+Enter the development environment, which includes Rust tools and the runtime
+dependencies (`nix`, `bwrap`, `pasta`, and `systemd-run`):
+
+```bash
+nix develop
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
+
+The flake also supports the standard package workflows:
+
+```bash
+nix build
+nix run . -- --help
+nix profile install .
+nix flake check
+```
+
+Network integration tests make real namespace and localhost checks and require a
+Linux host that permits user namespace creation, localhost binding, Nix
+evaluation, a `nixpkgs` registry entry, and a systemd user manager.

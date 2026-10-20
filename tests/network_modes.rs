@@ -5,12 +5,12 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-const PRIVATE_ATTR: &str = ".#private-test";
-const NONE_ATTR: &str = ".#none-test";
-const HOST_ATTR: &str = ".#host-test";
+const PRIVATE_ATTR: &str = "private-test";
+const NONE_ATTR: &str = "none-test";
+const HOST_ATTR: &str = "host-test";
 
 fn run_sandbox(attr: &str, script: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_sandbox"))
+    Command::new(env!("CARGO_BIN_EXE_realm"))
         .args([attr, "--", "bash", "--noprofile", "--norc", "-c", script])
         .output()
         .expect("start sandbox binary")
@@ -200,8 +200,8 @@ if curl --silent --show-error --connect-timeout 3 http://127.0.0.1:{port}/ >/dev
 
 #[test]
 fn private_is_launched_with_resource_limits() {
-    let script = r#"printf 'pid=%s\n' "$$"; sleep 3"#;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sandbox"))
+    let script = "sleep 10";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_realm"))
         .args([
             PRIVATE_ATTR,
             "--",
@@ -215,13 +215,80 @@ fn private_is_launched_with_resource_limits() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("start private sandbox");
-    thread::sleep(Duration::from_millis(500));
-    let pid = child.id();
-    let cg = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
-        .expect("read private launcher cgroup");
+    let unit = format!("realm-sandbox-{}.scope", child.id());
+    let mut relative = String::new();
+    for _ in 0..100 {
+        let cgroup = Command::new("systemctl")
+            .args([
+                "--user",
+                "show",
+                &unit,
+                "--property=ControlGroup",
+                "--value",
+            ])
+            .output()
+            .expect("query private scope cgroup");
+        assert!(
+            cgroup.status.success(),
+            "systemctl failed: {}",
+            String::from_utf8_lossy(&cgroup.stderr)
+        );
+        relative = String::from_utf8_lossy(&cgroup.stdout).trim().to_string();
+        if !relative.is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
     assert!(
-        !cg.trim().is_empty(),
-        "private launcher has no cgroup membership"
+        relative.ends_with(".scope"),
+        "invalid systemd cgroup: {relative}"
+    );
+    let cgroup_dir = std::path::Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/'));
+    assert!(
+        cgroup_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".scope"),
+        "private launcher is not inside a systemd scope: {relative}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cgroup_dir.join("memory.max"))
+            .unwrap()
+            .trim(),
+        "2147483648"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cgroup_dir.join("pids.max"))
+            .unwrap()
+            .trim(),
+        "512"
+    );
+    let cpu_max = std::fs::read_to_string(cgroup_dir.join("cpu.max")).unwrap();
+    let mut cpu_fields = cpu_max.split_whitespace();
+    let quota: u64 = cpu_fields.next().unwrap().parse().unwrap();
+    let period: u64 = cpu_fields.next().unwrap().parse().unwrap();
+    assert!(quota <= period, "CPU quota exceeds 100%: {cpu_max}");
+
+    let runtime = Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            &unit,
+            "--property=RuntimeMaxUSec",
+            "--value",
+        ])
+        .output()
+        .expect("query systemd scope runtime limit");
+    assert!(
+        runtime.status.success(),
+        "systemctl failed: {}",
+        String::from_utf8_lossy(&runtime.stderr)
+    );
+    let runtime = String::from_utf8_lossy(&runtime.stdout);
+    assert!(
+        runtime.trim() == "3600000000" || runtime.trim() == "1h",
+        "unexpected RuntimeMaxSec: {runtime}"
     );
     let _ = child.kill();
     let _ = child.wait();

@@ -48,7 +48,7 @@ impl Default for ResourceLimits {
             memory_bytes: 2 * 1024 * 1024 * 1024, // 2 GiB
             cpu_percent: 100,                     // one core
             max_pids: 512,
-            timeout_secs: None,
+            timeout_secs: Some(60 * 60),    // one hour
             tmpfs_bytes: 512 * 1024 * 1024, // 512 MiB
         }
     }
@@ -81,7 +81,7 @@ mod tests {
         assert_eq!(l.memory_bytes, 2 * 1024 * 1024 * 1024);
         assert_eq!(l.max_pids, 512);
         assert_eq!(l.tmpfs_bytes, 512 * 1024 * 1024);
-        assert!(l.timeout_secs.is_none());
+        assert_eq!(l.timeout_secs, Some(60 * 60));
     }
 
     #[test]

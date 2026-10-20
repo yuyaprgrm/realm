@@ -18,22 +18,33 @@ pub struct SandboxCfg {
     pub network: Option<String>,
 }
 
-// Nix evaluation outside sandbox: extract network only if present, validate strictly later
-const APPLY: &str = "s: { packages = map (p: { out = builtins.toString p; drv = if builtins.isAttrs p && (p.type or \"\") == \"derivation\" then p.drvPath else null; }) s.packages; env = s.env or {}; network = s.network or null; }";
+// Nix evaluates realm.nix and package derivations outside the sandbox.
+const NORMALIZE: &str = "cfg: { packages = map (p: { out = builtins.toString p; drv = if builtins.isAttrs p && (p.type or \"\") == \"derivation\" then p.drvPath else null; }) cfg.packages; env = cfg.env or {}; network = cfg.network or null; }";
 
-pub fn eval_sandbox(flake_dir: &std::path::Path, system: &str, attr: &str) -> Result<SandboxCfg> {
-    // nix eval --json --apply <normalize> <flake>#sandboxes.<system>.<name>
-    let flake_ref = format!("{}#sandboxes.{}.{}", flake_dir.display(), system, attr);
+pub fn eval_sandbox(config: &std::path::Path, name: &str) -> Result<SandboxCfg> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character))
+    {
+        return Err(Error::Nix(
+            "sandbox name may contain only ASCII letters, digits, hyphens, and underscores".into(),
+        ));
+    }
+    // Nix evaluates the standalone realm.nix function and computes package outputs.
+    let transform =
+        format!("config: let cfg = config {{ }}; in ({NORMALIZE}) (builtins.getAttr {name:?} cfg)");
     let out = Command::new("nix")
         .args([
             "--extra-experimental-features",
             "nix-command flakes",
             "eval",
+            "--impure",
             "--json",
-            "--apply",
-            APPLY,
-            &flake_ref,
+            "--file",
         ])
+        .arg(config)
+        .args(["--apply", &transform])
         .output()
         .map_err(|e| Error::Nix(e.to_string()))?;
     if !out.status.success() {
@@ -133,20 +144,20 @@ mod tests {
 
     #[test]
     fn parses_network_policy() {
-        let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{},"network":"disabled"}"#;
+        let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{},"network":"none"}"#;
         assert_eq!(
             parse_sandbox_json(json).unwrap().network.as_deref(),
-            Some("disabled")
+            Some("none")
         );
-        let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{},"network":"isolated"}"#;
+        let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{},"network":"private"}"#;
         assert_eq!(
             parse_sandbox_json(json).unwrap().network.as_deref(),
-            Some("isolated")
+            Some("private")
         );
-        let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{},"network":"internet"}"#;
+        let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{},"network":"host"}"#;
         assert_eq!(
             parse_sandbox_json(json).unwrap().network.as_deref(),
-            Some("internet")
+            Some("host")
         );
         let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{}}"#;
         assert_eq!(parse_sandbox_json(json).unwrap().network, None);

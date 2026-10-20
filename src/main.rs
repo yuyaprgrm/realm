@@ -1,15 +1,21 @@
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "sandbox", about = "Nix-native sandbox runtime")]
+#[command(name = "realm", about = "Nix-native Linux sandbox runtime")]
 struct Args {
-    #[arg(value_name = "FLAKE_REF")]
-    flake_ref: String,
+    #[arg(short, long, default_value = "realm.nix", value_name = "FILE")]
+    config: std::path::PathBuf,
+    #[arg(value_name = "SANDBOX")]
+    sandbox: String,
     #[arg(last = true)]
     command: Vec<String>,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    Ok(sandbox::sandbox::run(&args.flake_ref, &args.command)?)
+    Ok(realm::sandbox::run(
+        &args.config,
+        &args.sandbox,
+        &args.command,
+    )?)
 }

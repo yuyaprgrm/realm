@@ -6,69 +6,23 @@ use crate::error::Result;
 use crate::nix::eval::SandboxCfg;
 use crate::sandbox::spec::SandboxSpec;
 
-pub fn build_spec(flake_ref: &str) -> Result<SandboxSpec> {
-    let (flake_dir, attr) = parse_flake_ref(flake_ref)?;
-    let system = current_system()?;
-    let sandbox_cfg = eval::eval_sandbox(&flake_dir, &system, &attr)?;
+pub fn build_spec(config: &std::path::Path, sandbox_name: &str) -> Result<SandboxSpec> {
+    let config = if config.is_absolute() {
+        config.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(config)
+    };
+    let config = config.canonicalize().map_err(|error| {
+        crate::error::Error::Nix(format!(
+            "cannot read Realm configuration {}: {error}",
+            config.display()
+        ))
+    })?;
+    let sandbox_cfg = eval::eval_sandbox(&config, sandbox_name)?;
     realize::realize_packages(&sandbox_cfg.packages)?;
     let out_paths: Vec<String> = sandbox_cfg.packages.iter().map(|p| p.out.clone()).collect();
     let closure_paths = closure::get_closure(&out_paths)?;
     build_bwrap_spec(&sandbox_cfg, &closure_paths, std::env::current_dir()?)
-}
-
-fn parse_flake_ref(flake_ref: &str) -> Result<(std::path::PathBuf, String)> {
-    if let Some((left, right)) = flake_ref.split_once('#') {
-        let dir = if left.is_empty() || left == "." {
-            ".".to_string()
-        } else {
-            left.to_string()
-        };
-        let p = std::path::PathBuf::from(dir);
-        Ok((p.canonicalize().unwrap_or(p), right.to_string()))
-    } else {
-        Err(crate::error::Error::Nix(
-            "flake ref must be <flake>#<name>".into(),
-        ))
-    }
-}
-
-fn current_system() -> Result<String> {
-    let out = std::process::Command::new("nix")
-        .args([
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "eval",
-            "--raw",
-            "--expr",
-            "builtins.currentSystem",
-        ])
-        .output()
-        .map_err(|e| crate::error::Error::Nix(e.to_string()))?;
-    if !out.status.success() {
-        // try fallback
-        let out2 = std::process::Command::new("uname")
-            .args(["-m"])
-            .output()
-            .map_err(|e| crate::error::Error::Nix(e.to_string()))?;
-        if !out2.status.success() {
-            return Err(crate::error::Error::Nix(
-                String::from_utf8_lossy(&out.stderr).into(),
-            ));
-        }
-        let m = String::from_utf8(out2.stdout)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let sys = if m == "x86_64" {
-            "x86_64-linux".to_string()
-        } else if m == "aarch64" {
-            "aarch64-linux".to_string()
-        } else {
-            return Err(crate::error::Error::Nix("unknown arch".into()));
-        };
-        return Ok(sys);
-    }
-    String::from_utf8(out.stdout).map_err(|e| crate::error::Error::Nix(e.to_string()))
 }
 
 fn build_bwrap_spec(

@@ -8,13 +8,13 @@ pub mod spec;
 use crate::error::{Error, Result};
 use crate::sandbox::backend::SandboxBackend;
 
-pub fn run(flake_ref: &str, command: &[String]) -> Result<()> {
+pub fn run(config: &std::path::Path, sandbox_name: &str, command: &[String]) -> Result<()> {
     if cfg!(not(target_os = "linux")) {
         return Err(Error::Spec(
-            "sandbox runtime requires Linux (bwrap backend); Nix flake outputs may support other platforms but the runtime is Linux-only".into(),
+            "Realm requires Linux (bubblewrap and Linux namespaces); its Nix package may be evaluated on other platforms".into(),
         ));
     }
-    let mut spec = crate::nix::build_spec(flake_ref)?;
+    let mut spec = crate::nix::build_spec(config, sandbox_name)?;
     if !command.is_empty() {
         // first is executable if we want, else run via shell - but easier: run the command directly
         spec.executable = std::path::PathBuf::from(&command[0]);

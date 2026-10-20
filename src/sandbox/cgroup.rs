@@ -10,6 +10,11 @@ pub fn exec_with_limits(spec: &SandboxSpec) -> Result<()> {
     let bwrap = bwrap::build_command(spec)?;
 
     if spec.network == crate::sandbox::spec::NetworkMode::Private {
+        if !systemd_user_scope_available() {
+            return Err(Error::Bwrap(
+                "network mode \"private\" requires an available systemd user manager to enforce cgroup limits".into(),
+            ));
+        }
         let pasta_path = crate::sandbox::network::require_pasta()?;
         // pasta starts in the background and configures a user/network namespace
         // for its caller. Run it inside the scope, then have bwrap join that
@@ -33,12 +38,7 @@ pub fn exec_with_limits(spec: &SandboxSpec) -> Result<()> {
         helper.args(bwrap.get_args());
         pasta.arg(helper.get_program()).args(helper.get_args());
 
-        let mut cmd = if systemd_user_scope_available() {
-            systemd_wrapper(spec, &pasta)
-        } else {
-            bwrap::apply_rlimits(&mut pasta, spec);
-            pasta
-        };
+        let mut cmd = systemd_wrapper(spec, &pasta);
         let err = cmd.exec();
         return Err(Error::Bwrap(format!("exec failed: {}", err)));
     }
@@ -62,6 +62,8 @@ fn systemd_wrapper(spec: &SandboxSpec, bwrap: &Command) -> Command {
     cmd.arg("--user")
         .arg("--scope")
         .arg("--quiet")
+        .arg("--unit")
+        .arg(format!("realm-sandbox-{}.scope", std::process::id()))
         .arg("-p")
         .arg(format!("MemoryMax={}", spec.limits.memory_bytes))
         .arg("-p")
@@ -127,8 +129,7 @@ mod tests {
         assert!(args.contains(&"MemoryMax=2147483648".to_string()));
         assert!(args.contains(&"CPUQuota=100%".to_string()));
         assert!(args.contains(&"TasksMax=512".to_string()));
-        // no timeout configured => no RuntimeMaxSec
-        assert!(!args.iter().any(|a| a.starts_with("RuntimeMaxSec")));
+        assert!(args.contains(&"RuntimeMaxSec=3600".to_string()));
     }
 
     #[test]
@@ -143,12 +144,9 @@ mod tests {
         let mut s = spec();
         s.network = NetworkMode::Private;
         s.limits.timeout_secs = Some(45);
-        let pasta = Command::new("/nix/store/passt/bin/pasta");
+        let pasta = Command::new("pasta");
         let args = wrapper_args_for(&s, &pasta);
-        assert_eq!(
-            args.last().map(String::as_str),
-            Some("/nix/store/passt/bin/pasta")
-        );
+        assert_eq!(args.last().map(String::as_str), Some("pasta"));
         assert!(args.contains(&"MemoryMax=2147483648".to_string()));
         assert!(args.contains(&"CPUQuota=100%".to_string()));
         assert!(args.contains(&"TasksMax=512".to_string()));
