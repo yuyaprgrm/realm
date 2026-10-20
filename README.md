@@ -25,6 +25,22 @@ nix profile install github:yuyaprgrm/realm
 realm --help
 ```
 
+The flake exposes `packages.<system>.realm` and `overlays.default`. Add the
+overlay to Nixpkgs to use Realm as `pkgs.realm`:
+
+```nix
+{
+  inputs.realm.url = "github:yuyaprgrm/realm";
+  nixpkgs.overlays = [ inputs.realm.overlays.default ];
+}
+```
+
+Then install it from NixOS or Home Manager with `pkgs.realm`, for example in
+`environment.systemPackages`. The package wrapper adds Realm's runtime tools
+(`nix`, bubblewrap, passt/pasta, and systemd) to `PATH`. `realm.nix` remains the
+sandbox configuration read by the executable; it is not the package or a
+NixOS/Home Manager module.
+
 Run directly from a local checkout without installing:
 
 ```bash
