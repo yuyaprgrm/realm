@@ -11,7 +11,8 @@ pub fn build_spec(flake_ref: &str) -> Result<SandboxSpec> {
     let system = current_system()?;
     let sandbox_cfg = eval::eval_sandbox(&flake_dir, &system, &attr)?;
     realize::realize_packages(&sandbox_cfg.packages)?;
-    let closure_paths = closure::get_closure(&sandbox_cfg.packages)?;
+    let out_paths: Vec<String> = sandbox_cfg.packages.iter().map(|p| p.out.clone()).collect();
+    let closure_paths = closure::get_closure(&out_paths)?;
     Ok(build_bwrap_spec(
         &sandbox_cfg,
         &closure_paths,
@@ -108,7 +109,7 @@ fn build_bwrap_spec(
     // build PATH from top-level package bin dirs
     let mut path_bins: Vec<PathBuf> = Vec::new();
     for pkg in &cfg.packages {
-        let b = PathBuf::from(pkg).join("bin");
+        let b = PathBuf::from(&pkg.out).join("bin");
         if b.exists() {
             path_bins.push(b);
         } else {
@@ -130,7 +131,7 @@ fn build_bwrap_spec(
     // choose executable: try to find a shell from PATH packages? or just /bin/sh? but we don't put /bin/sh - look for bash in packages
     let mut exe = PathBuf::from("/bin/sh");
     for pkg in &cfg.packages {
-        let bash = PathBuf::from(pkg).join("bin").join("bash");
+        let bash = PathBuf::from(&pkg.out).join("bin").join("bash");
         if bash.exists() {
             exe = bash;
             break;
@@ -143,7 +144,7 @@ fn build_bwrap_spec(
     if exe == PathBuf::from("/bin/sh") {
         // as last resort, pick first package's bin/sh if exists
         for pkg in &cfg.packages {
-            let sh = PathBuf::from(pkg).join("bin").join("sh");
+            let sh = PathBuf::from(&pkg.out).join("bin").join("sh");
             if sh.exists() { exe = sh; break; }
         }
     }

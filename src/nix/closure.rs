@@ -4,21 +4,25 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-fn add_from_path_info(p: &str, closure: &mut HashSet<String>) -> Result<()> {
+fn add_from_path_info(paths: &[String], closure: &mut HashSet<String>) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    // one batched path-info call for all roots
     let out = Command::new("nix")
         .args([
             "--extra-experimental-features",
             "nix-command flakes",
             "path-info",
             "--recursive",
-            p,
         ])
+        .args(paths)
         .output()
         .map_err(|e| Error::Nix(e.to_string()))?;
     if !out.status.success() {
         return Err(Error::Nix(format!(
             "path-info failed for {}: {}",
-            p,
+            paths.join(", "),
             String::from_utf8_lossy(&out.stderr)
         )));
     }
@@ -73,7 +77,10 @@ fn follow_symlinks(closure: &mut HashSet<String>) -> Result<()> {
                                         let store_root = format!("/nix/store/{}", sp);
                                         if !closure.contains(&store_root) {
                                             closure.insert(store_root.clone());
-                                            add_from_path_info(&store_root, closure)?;
+                                            add_from_path_info(
+                                                std::slice::from_ref(&store_root),
+                                                closure,
+                                            )?;
                                             q.push_back(store_root);
                                             continue;
                                         } else if !seen_scan.contains(&store_root) {
@@ -99,9 +106,7 @@ fn follow_symlinks(closure: &mut HashSet<String>) -> Result<()> {
 
 pub fn get_closure(packages: &[String]) -> Result<HashSet<String>> {
     let mut closure: HashSet<String> = HashSet::new();
-    for p in packages {
-        add_from_path_info(p, &mut closure)?;
-    }
+    add_from_path_info(packages, &mut closure)?;
     // follow absolute symlinks inside closure
     follow_symlinks(&mut closure)?;
     Ok(closure)

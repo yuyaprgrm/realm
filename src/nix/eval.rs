@@ -3,14 +3,27 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Command;
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Package {
+    /// output store path (may be unrealised)
+    pub out: String,
+    /// derivation that builds `out`, if the package is a derivation
+    pub drv: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct SandboxCfg {
-    pub packages: Vec<String>,
+    pub packages: Vec<Package>,
     pub env: HashMap<String, String>,
 }
 
+// Derivations coerce to their output path in `nix eval --json`, so resolve
+// drv/out explicitly under keys that do not trigger coercion ("outPath" would
+// collapse each object back to a plain string).
+const APPLY: &str = "s: { packages = map (p: { out = builtins.toString p; drv = if builtins.isAttrs p && (p.type or \"\") == \"derivation\" then p.drvPath else null; }) s.packages; env = s.env or {}; }";
+
 pub fn eval_sandbox(flake_dir: &std::path::Path, system: &str, attr: &str) -> Result<SandboxCfg> {
-    // nix eval --json <flake>#sandboxes.<system>.<name>
+    // nix eval --json --apply <normalize> <flake>#sandboxes.<system>.<name>
     let flake_ref = format!("{}#sandboxes.{}.{}", flake_dir.display(), system, attr);
     let out = Command::new("nix")
         .args([
@@ -18,6 +31,8 @@ pub fn eval_sandbox(flake_dir: &std::path::Path, system: &str, attr: &str) -> Re
             "nix-command flakes",
             "eval",
             "--json",
+            "--apply",
+            APPLY,
             &flake_ref,
         ])
         .output()
@@ -25,19 +40,40 @@ pub fn eval_sandbox(flake_dir: &std::path::Path, system: &str, attr: &str) -> Re
     if !out.status.success() {
         return Err(Error::Nix(String::from_utf8_lossy(&out.stderr).into()));
     }
-    let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| Error::Nix(e.to_string()))?;
-    // validate schema
-    let obj = v.as_object().ok_or_else(|| Error::Nix("sandbox must be object".into()))?;
+    parse_sandbox_json(&out.stdout)
+}
+
+fn parse_sandbox_json(bytes: &[u8]) -> Result<SandboxCfg> {
+    let v: Value = serde_json::from_slice(bytes).map_err(|e| Error::Nix(e.to_string()))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| Error::Nix("sandbox must be object".into()))?;
     let packages = obj
         .get("packages")
         .and_then(|x| x.as_array())
         .ok_or_else(|| Error::Nix("packages must be array".into()))?;
     let mut pkgs = Vec::new();
-    for p in packages {
-        let s = p
-            .as_str()
-            .ok_or_else(|| Error::Nix("package entries must be strings".into()))?;
-        pkgs.push(s.to_string());
+    for (i, p) in packages.iter().enumerate() {
+        let o = p
+            .as_object()
+            .ok_or_else(|| Error::Nix(format!("packages[{i}] must be object")))?;
+        let out = o
+            .get("out")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| Error::Nix(format!("packages[{i}].out must be string")))?
+            .to_string();
+        let drv = match o.get("drv") {
+            None | Some(Value::Null) => None,
+            Some(x) => Some(
+                x.as_str()
+                    .ok_or_else(|| Error::Nix(format!("packages[{i}].drv must be string or null")))?
+                    .to_string(),
+            ),
+        };
+        if out.is_empty() {
+            return Err(Error::Nix(format!("packages[{i}].out must not be empty")));
+        }
+        pkgs.push(Package { out, drv });
     }
     let mut env = HashMap::new();
     if let Some(e) = obj.get("env") {
@@ -53,5 +89,43 @@ pub fn eval_sandbox(flake_dir: &std::path::Path, system: &str, attr: &str) -> Re
             return Err(Error::Nix("env must be object".into()));
         }
     }
-    Ok(SandboxCfg { packages: pkgs, env })
+    Ok(SandboxCfg {
+        packages: pkgs,
+        env,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_out_drv_objects() {
+        let json = br#"{"packages":[
+            {"out":"/nix/store/aaa-x","drv":"/nix/store/aaa-x.drv"},
+            {"out":"/nix/store/bbb-y","drv":null}
+        ],"env":{"FOO":"bar"}}"#;
+        let cfg = parse_sandbox_json(json).unwrap();
+        assert_eq!(
+            cfg.packages,
+            vec![
+                Package {
+                    out: "/nix/store/aaa-x".into(),
+                    drv: Some("/nix/store/aaa-x.drv".into())
+                },
+                Package {
+                    out: "/nix/store/bbb-y".into(),
+                    drv: None
+                },
+            ]
+        );
+        assert_eq!(cfg.env.get("FOO").map(String::as_str), Some("bar"));
+    }
+
+    #[test]
+    fn rejects_bad_entries() {
+        assert!(parse_sandbox_json(br#"{"packages":["/nix/store/x"]}"#).is_err());
+        assert!(parse_sandbox_json(br#"{"packages":[{"out":"/nix/store/x","drv":1}]}"#).is_err());
+        assert!(parse_sandbox_json(br#"{"env":{}}"#).is_err());
+    }
 }
