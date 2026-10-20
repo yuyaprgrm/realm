@@ -44,15 +44,18 @@ fn private_network_command(pasta_path: &std::path::Path, bwrap: &Command) -> Com
         .arg("--foreground")
         .arg("--quiet")
         .arg("--config-net")
-        .arg("--map-host-loopback")
-        .arg("none")
-        .arg("--ipv4-only")
         .arg("--address")
         .arg(crate::sandbox::network::PASTA_ADDRESS)
         .arg("--gateway")
         .arg(crate::sandbox::network::PASTA_GATEWAY)
         .arg("--dns-forward")
-        .arg(crate::sandbox::network::PASTA_DNS_FORWARD);
+        .arg(crate::sandbox::network::PASTA_DNS_FORWARD)
+        .arg("--map-host-loopback")
+        .arg("none")
+        .arg("--tcp-ns")
+        .arg("none")
+        .arg("--udp-ns")
+        .arg("none");
     pasta.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     let mut helper = Command::new("/bin/sh");
     helper.arg("-c").arg("exec \"$@\"").arg("realm-pasta");
@@ -179,6 +182,13 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--gateway", "10.0.2.2"])
         );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--dns-forward", "10.0.2.3"])
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--tcp-ns", "none"]));
+        assert!(args.windows(2).any(|pair| pair == ["--udp-ns", "none"]));
+        assert!(!args.iter().any(|arg| arg == "--ipv4-only"));
     }
 
     fn wrapper_args_for(s: &SandboxSpec, program: &Command) -> Vec<String> {
