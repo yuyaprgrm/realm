@@ -93,3 +93,11 @@ nix flake check
 Network integration tests make real namespace and localhost checks and require a
 Linux host that permits user namespace creation, localhost binding, Nix
 evaluation, a `nixpkgs` registry entry, and a systemd user manager.
+
+The test suite always checks that `none` and `private` cannot reach a host-local
+HTTP server while `host` can. It attempts external HTTPS in Private mode when
+available; require that check explicitly with:
+
+```bash
+REALM_TEST_REQUIRE_EXTERNAL_HTTPS=1 cargo test --test network_modes private_has_network_dns_internet_and_cannot_reach_host_localhost
+```

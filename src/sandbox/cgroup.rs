@@ -19,25 +19,7 @@ pub fn exec_with_limits(spec: &SandboxSpec) -> Result<()> {
         // pasta starts in the background and configures a user/network namespace
         // for its caller. Run it inside the scope, then have bwrap join that
         // namespace instead of creating a disconnected one of its own.
-        let mut pasta = Command::new(pasta_path);
-        pasta
-            .arg("--foreground")
-            .arg("--quiet")
-            .arg("--config-net")
-            .arg("--ipv4-only")
-            .arg("--address")
-            .arg(crate::sandbox::network::PASTA_ADDRESS)
-            .arg("--gateway")
-            .arg(crate::sandbox::network::PASTA_GATEWAY)
-            .arg("--dns-forward")
-            .arg(crate::sandbox::network::PASTA_DNS_FORWARD);
-        pasta.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-        let mut helper = Command::new("/bin/sh");
-        helper.arg("-c").arg("exec \"$@\"").arg("realm-pasta");
-        helper.arg(bwrap.get_program());
-        helper.args(bwrap.get_args());
-        pasta.arg(helper.get_program()).args(helper.get_args());
-
+        let pasta = private_network_command(&pasta_path, &bwrap);
         let mut cmd = systemd_wrapper(spec, &pasta);
         let err = cmd.exec();
         return Err(Error::Bwrap(format!("exec failed: {}", err)));
@@ -54,6 +36,30 @@ pub fn exec_with_limits(spec: &SandboxSpec) -> Result<()> {
     // exec() only returns on failure.
     let err = cmd.exec();
     Err(Error::Bwrap(format!("exec failed: {}", err)))
+}
+
+fn private_network_command(pasta_path: &std::path::Path, bwrap: &Command) -> Command {
+    let mut pasta = Command::new(pasta_path);
+    pasta
+        .arg("--foreground")
+        .arg("--quiet")
+        .arg("--config-net")
+        .arg("--map-host-loopback")
+        .arg("none")
+        .arg("--ipv4-only")
+        .arg("--address")
+        .arg(crate::sandbox::network::PASTA_ADDRESS)
+        .arg("--gateway")
+        .arg(crate::sandbox::network::PASTA_GATEWAY)
+        .arg("--dns-forward")
+        .arg(crate::sandbox::network::PASTA_DNS_FORWARD);
+    pasta.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    let mut helper = Command::new("/bin/sh");
+    helper.arg("-c").arg("exec \"$@\"").arg("realm-pasta");
+    helper.arg(bwrap.get_program());
+    helper.args(bwrap.get_args());
+    pasta.arg(helper.get_program()).args(helper.get_args());
+    pasta
 }
 
 /// Build the `systemd-run --user --scope ...` wrapper around a bwrap command.
@@ -151,6 +157,28 @@ mod tests {
         assert!(args.contains(&"CPUQuota=100%".to_string()));
         assert!(args.contains(&"TasksMax=512".to_string()));
         assert!(args.contains(&"RuntimeMaxSec=45".to_string()));
+    }
+
+    #[test]
+    fn private_pasta_does_not_map_host_loopback() {
+        let command =
+            private_network_command(std::path::Path::new("/bin/pasta"), &Command::new("bwrap"));
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--map-host-loopback", "none"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--address", "10.0.2.100/24"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--gateway", "10.0.2.2"])
+        );
     }
 
     fn wrapper_args_for(s: &SandboxSpec, program: &Command) -> Vec<String> {

@@ -2,12 +2,69 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::MetadataExt;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::Duration;
 
 const PRIVATE_ATTR: &str = "private-test";
 const NONE_ATTR: &str = "none-test";
 const HOST_ATTR: &str = "host-test";
+
+struct HostLocalServer {
+    port: u16,
+    stop: Sender<()>,
+    join: Option<thread::JoinHandle<bool>>,
+}
+
+impl HostLocalServer {
+    fn start() -> Self {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("bind host localhost test server");
+        listener.set_nonblocking(true).expect("set nonblocking");
+        let port = listener.local_addr().expect("read server address").port();
+        let (stop, stopped) = mpsc::channel();
+        let join = thread::spawn(move || {
+            loop {
+                if stopped.try_recv().is_ok() {
+                    return false;
+                }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0_u8; 1024];
+                        let _ = stream.read(&mut request);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        );
+                        return true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => return false,
+                }
+            }
+        });
+        Self {
+            port,
+            stop,
+            join: Some(join),
+        }
+    }
+
+    fn finish(mut self) -> bool {
+        let _ = self.stop.send(());
+        self.join.take().unwrap().join().expect("join HTTP server")
+    }
+}
+
+impl Drop for HostLocalServer {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
 
 fn run_sandbox(attr: &str, script: &str) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_realm"))
@@ -79,6 +136,7 @@ if test "$(stat -Lc %d:%i /dev)" = "{}:{}"; then echo dev:shared; else echo dev:
 
 #[test]
 fn none_has_no_interfaces_routes_dns_or_internet() {
+    let server = HostLocalServer::start();
     let script = format!(
         r#"{isolation}
 interfaces=0
@@ -88,96 +146,75 @@ routes=0
 while IFS= read -r line; do case "$line" in Iface*|'') ;; *) routes=$((routes + 1));; esac; done < /proc/net/route
 if test "$routes" -gt 0; then echo routes:present; else echo routes:none; fi
 if curl --silent --show-error --connect-timeout 3 https://example.com >/dev/null 2>&1; then echo internet:ok; else echo internet:no; fi
+if curl --silent --show-error --connect-timeout 2 http://127.0.0.1:{port}/ >/dev/null 2>&1; then echo host-localhost:reachable; else echo host-localhost:blocked; fi
 "#,
         isolation = isolation_check(),
+        port = server.port,
     );
     let output = run_sandbox(NONE_ATTR, &script);
     assert_process_isolated(&output);
     let text = output_text(&output);
-    for expected in ["interfaces:none", "routes:none", "internet:no"] {
-        assert!(text.contains(expected), "missing {expected}: {text}");
-    }
-}
-
-#[test]
-fn private_has_network_dns_internet_and_cannot_reach_host_localhost() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind host localhost test server");
-    listener.set_nonblocking(true).expect("set nonblocking");
-    let port = listener.local_addr().unwrap().port();
-    let server = thread::spawn(move || {
-        for _ in 0..200 {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let mut request = [0_u8; 1024];
-                    let _ = stream.read(&mut request);
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                    );
-                    return true;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10))
-                }
-                Err(_) => return false,
-            }
-        }
-        false
-    });
-
-    let script = format!(
-        r#"{isolation}
-interfaces=0
-while IFS= read -r line; do case "$line" in *:*) name=${{line%%:*}}; name=${{name//[[:space:]]/}}; if test "$name" != lo; then interfaces=$((interfaces + 1)); fi;; esac; done < /proc/net/dev
-if test "$interfaces" -gt 0; then echo interfaces:present; else echo interfaces:none; fi
-routes=0
-while IFS= read -r line; do case "$line" in Iface*|'') ;; *) routes=$((routes + 1));; esac; done < /proc/net/route
-if test "$routes" -gt 0; then echo routes:present; else echo routes:none; fi
-if curl --silent --show-error --connect-timeout 5 https://example.com >/dev/null 2>&1; then echo internet:ok; else echo internet:no; fi
-if curl --silent --show-error --connect-timeout 2 http://127.0.0.1:{port}/ >/dev/null 2>&1; then echo host-localhost:reachable; else echo host-localhost:blocked; fi
-"#,
-        isolation = isolation_check(),
-    );
-    let output = run_sandbox(PRIVATE_ATTR, &script);
-    assert_process_isolated(&output);
-    let text = output_text(&output);
     for expected in [
-        "interfaces:present",
-        "routes:present",
-        "internet:ok",
+        "interfaces:none",
+        "routes:none",
+        "internet:no",
         "host-localhost:blocked",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
     assert!(
-        !server.join().unwrap(),
-        "server on host localhost received a private sandbox connection"
+        !server.finish(),
+        "host localhost server received a None sandbox connection"
     );
 }
 
 #[test]
+fn private_has_network_dns_internet_and_cannot_reach_host_localhost() {
+    let server = HostLocalServer::start();
+    let require_external_https = std::env::var_os("REALM_TEST_REQUIRE_EXTERNAL_HTTPS").is_some();
+
+    let script = format!(
+        r#"{isolation}
+if test "$(stat -Lc %i /proc/self/ns/net)" = "{host_netns}"; then echo netns:host; else echo netns:private; fi
+interfaces=0
+while IFS= read -r line; do case "$line" in *:*) name=${{line%%:*}}; name=${{name//[[:space:]]/}}; if test "$name" != lo; then interfaces=$((interfaces + 1)); fi;; esac; done < /proc/net/dev
+if test "$interfaces" -gt 0; then echo interfaces:present; else echo interfaces:none; fi
+default_route=0
+while read -r iface destination rest; do if test "$destination" = 00000000; then default_route=1; fi; done < /proc/net/route
+if test "$default_route" -eq 1; then echo default-route:present; else echo default-route:none; fi
+if curl --silent --show-error --connect-timeout 5 --max-time 8 https://example.com >/dev/null 2>&1; then echo external-https:ok; else echo external-https:unavailable; fi
+if curl --silent --show-error --connect-timeout 2 http://127.0.0.1:{port}/ >/dev/null 2>&1; then echo host-localhost:reachable; else echo host-localhost:blocked; fi
+"#,
+        isolation = isolation_check(),
+        host_netns = namespace_inode("net"),
+        port = server.port,
+    );
+    let output = run_sandbox(PRIVATE_ATTR, &script);
+    assert_process_isolated(&output);
+    let text = output_text(&output);
+    for expected in [
+        "netns:private",
+        "interfaces:present",
+        "default-route:present",
+        "host-localhost:blocked",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    assert!(
+        !server.finish(),
+        "server on host localhost received a private sandbox connection"
+    );
+    if require_external_https {
+        assert!(
+            text.contains("external-https:ok"),
+            "external HTTPS was required but unavailable: {text}"
+        );
+    }
+}
+
+#[test]
 fn host_shares_network_namespace_and_host_loopback() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind host localhost test server");
-    listener.set_nonblocking(true).expect("set nonblocking");
-    let port = listener.local_addr().unwrap().port();
-    let server = thread::spawn(move || {
-        for _ in 0..200 {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let mut request = [0_u8; 1024];
-                    let _ = stream.read(&mut request);
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                    );
-                    return true;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10))
-                }
-                Err(_) => return false,
-            }
-        }
-        false
-    });
+    let server = HostLocalServer::start();
     let script = format!(
         r#"{isolation}
 if test "$(stat -Lc %i /proc/self/ns/net)" = "{host_netns}"; then echo netns:host; else echo netns:private; fi
@@ -185,6 +222,7 @@ if curl --silent --show-error --connect-timeout 3 http://127.0.0.1:{port}/ >/dev
 "#,
         isolation = isolation_check(),
         host_netns = namespace_inode("net"),
+        port = server.port,
     );
     let output = run_sandbox(HOST_ATTR, &script);
     assert_process_isolated(&output);
@@ -193,7 +231,7 @@ if curl --silent --show-error --connect-timeout 3 http://127.0.0.1:{port}/ >/dev
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
     assert!(
-        server.join().unwrap(),
+        server.finish(),
         "host sandbox did not reach host localhost listener"
     );
 }
