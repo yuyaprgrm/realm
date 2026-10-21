@@ -23,6 +23,8 @@ pub struct WorkspaceCfg {
 #[derive(Debug)]
 pub struct SandboxCfg {
     pub packages: Vec<Package>,
+    /// Output store paths propagated by each listed package, in package order.
+    pub propagated: Vec<Vec<String>>,
     pub env: HashMap<String, String>,
     pub network: Option<String>,
     pub mounts: Vec<BindMount>,
@@ -50,6 +52,7 @@ in {
     out = builtins.toString p;
     drv = if builtins.isAttrs p && (p.type or "") == "derivation" then p.drvPath else null;
   }) cfg.packages;
+  propagated = map (p: map (x: x.outPath) (p.propagatedBuildInputs or [])) cfg.packages;
   env = cfg.env or {};
   network = cfg.network or null;
   mounts = map (m: {
@@ -123,6 +126,27 @@ fn parse_sandbox_json(bytes: &[u8]) -> Result<SandboxCfg> {
             return Err(Error::Nix(format!("packages[{i}].out must not be empty")));
         }
         pkgs.push(Package { out, drv });
+    }
+    let mut propagated = Vec::new();
+    if let Some(p) = obj.get("propagated") {
+        let groups = p
+            .as_array()
+            .ok_or_else(|| Error::Nix("propagated must be array".into()))?;
+        for (i, group) in groups.iter().enumerate() {
+            let entries = group
+                .as_array()
+                .ok_or_else(|| Error::Nix(format!("propagated[{i}] must be array")))?;
+            let mut outs = Vec::new();
+            for (j, out) in entries.iter().enumerate() {
+                let out = out
+                    .as_str()
+                    .ok_or_else(|| Error::Nix(format!("propagated[{i}][{j}] must be string")))?;
+                outs.push(out.to_string());
+            }
+            propagated.push(outs);
+        }
+    } else {
+        propagated.resize(pkgs.len(), Vec::new());
     }
     let mut env = HashMap::new();
     if let Some(e) = obj.get("env") {
@@ -217,6 +241,7 @@ fn parse_sandbox_json(bytes: &[u8]) -> Result<SandboxCfg> {
 
     Ok(SandboxCfg {
         packages: pkgs,
+        propagated,
         env,
         network,
         mounts,
@@ -251,6 +276,32 @@ mod tests {
         );
         assert_eq!(cfg.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(cfg.network, None);
+        assert_eq!(
+            cfg.propagated,
+            vec![Vec::<String>::new(), Vec::<String>::new()]
+        );
+    }
+
+    #[test]
+    fn parses_propagated_outputs_per_package() {
+        let json = br#"{"packages":[
+            {"out":"/nix/store/aaa-x"},
+            {"out":"/nix/store/bbb-y"}
+        ],"propagated":[
+            ["/nix/store/ccc-z","/nix/store/ddd-w"],
+            []
+        ],"env":{}}"#;
+        let cfg = parse_sandbox_json(json).unwrap();
+        assert_eq!(
+            cfg.propagated,
+            vec![
+                vec![
+                    "/nix/store/ccc-z".to_string(),
+                    "/nix/store/ddd-w".to_string()
+                ],
+                vec![],
+            ]
+        );
     }
 
     #[test]

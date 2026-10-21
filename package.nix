@@ -13,7 +13,10 @@
 rustPlatform.buildRustPackage {
   pname = "realm";
   version = "0.1.0";
-  src = lib.cleanSource ./.;
+  src = lib.cleanSourceWith {
+    filter = path: type: !(type == "directory" && baseNameOf path == "target");
+    src = ./.;
+  };
   cargoLock.lockFile = ./Cargo.lock;
 
   nativeBuildInputs = [ clippy makeWrapper rustfmt ];
@@ -25,9 +28,7 @@ rustPlatform.buildRustPackage {
     cargo fmt --all -- --check
     cargo clippy --locked --all-targets -- -D warnings
     cargo test --locked --lib
-    cargo test --locked --test environment --no-run
-    cargo test --locked --test mounts --no-run
-    cargo test --locked --test network_modes --no-run
+    cargo test --locked --test environment --test mounts --test network_modes -- --test-threads=1
     runHook postCheck
   '';
 

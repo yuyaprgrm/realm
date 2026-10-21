@@ -1,11 +1,10 @@
-//! Network backend selection and helpers.
+//! Network helpers.
 //!
 //! NetworkMode (None/Private/Host) defines semantics. For `Private`,
-//! we may use `pasta` to provide user-mode networking without sharing the
+//! we use `pasta` to provide user-mode networking without sharing the
 //! host network namespace.
 
 use crate::error::{Error, Result};
-use crate::sandbox::spec::NetworkMode;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
@@ -15,33 +14,11 @@ pub const PASTA_GATEWAY: &str = "10.0.2.2";
 /// Address exposed inside the pasta namespace as its DNS forwarding endpoint.
 pub const PASTA_DNS_FORWARD: &str = "10.0.2.3";
 
-/// Network connectivity backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetworkBackend {
-    /// No external connectivity.
-    None,
-    /// Connect private netns to host networking via pasta.
-    Pasta,
-}
-
-/// Resolve which backend to use for the given mode.
-pub fn backend_for(mode: NetworkMode) -> NetworkBackend {
-    match mode {
-        NetworkMode::None | NetworkMode::Host => NetworkBackend::None,
-        NetworkMode::Private => NetworkBackend::Pasta,
-    }
-}
-
-/// Find the pasta binary through PATH.
-pub fn find_pasta() -> Option<PathBuf> {
-    find_pasta_in(std::env::var_os("PATH").as_deref())
-}
-
 fn find_pasta_in(path: Option<&OsStr>) -> Option<PathBuf> {
     which::which_in("pasta", path, ".").ok()
 }
 
-/// Ensure pasta is available if backend requires it.
+/// Ensure pasta is available for private networking.
 pub fn require_pasta() -> Result<PathBuf> {
     require_pasta_in(std::env::var_os("PATH").as_deref())
 }

@@ -69,10 +69,15 @@ Configuration can be separated from the workspace and/or protected:
 ```
 
 If the configuration file itself is inside a writable workspace, Realm mounts
-that file read-only over its workspace path. This blocks rewriting the config
-file during the run, but does **not** protect sibling files that the config
-imports. For full protection, use `mode = "ro"` or keep the configuration
-outside the workspace.
+the directory that holds it read-only, so the directory cannot be renamed, and
+also overlays the configuration file read-only. Directories between the
+workspace and that directory are re-bound read-write on themselves, making them
+non-renamable mountpoints without making them read-only. When the file sits
+directly in the workspace root, only the file overlay is added because
+`/workspace` is already a mountpoint. This blocks rewriting the config file
+during the run, but does **not** protect sibling files that the config imports.
+For full protection, use `mode = "ro"` or keep the configuration outside the
+workspace.
 
 ## What is protected
 
@@ -149,19 +154,22 @@ Host environment variables are not inherited by the sandbox:
 
 | Control | systemd user scope | No systemd | Failure policy |
 | --- | --- | --- | --- |
-| Memory | `MemoryMax` (cgroup v2) | `RLIMIT_AS` + `RLIMIT_FSIZE` | fail-closed if `setrlimit` fails |
-| Task/process count | `TasksMax` | `RLIMIT_NPROC` | fail-closed if `setrlimit` fails |
+| Memory | `MemoryMax` (cgroup v2) | `RLIMIT_AS` (address space, not resident memory) | fail-closed if `setrlimit` fails |
+| Task/process count | `TasksMax` (per cgroup) | `RLIMIT_NPROC` (per user ID, host-wide) | fail-closed if `setrlimit` fails |
 | Wall-clock timeout | `RuntimeMaxSec` | coreutils `timeout` wrapper | fail-closed if `timeout` is missing |
 | CPU quota | `CPUQuota` | not enforceable; only `RLIMIT_CPU` seconds | degraded, documented as resource control |
 | `/tmp`, `/home/sandbox` size | bwrap `--size` tmpfs | bwrap `--size` tmpfs | enforced by bwrap in all modes |
 | Private network | systemd scope required | refused | fail-closed |
 | All cgroup limits | required when `requireCgroup = true` | refused | fail-closed |
 
-Memory and process-count limits are treated as DoS containment and are
-fail-closed in the fallback. CPU quota is a resource-control feature rather
-than a host-isolation boundary; without systemd the `RLIMIT_CPU` cap applies
-but the percentage quota is not emulated. `private` networking is fail-closed
-because pasta and the sandbox must share the resource scope.
+Address-space and process-count limits are treated as DoS containment and are
+fail-closed in the fallback. `RLIMIT_AS` caps address space, not resident
+memory. `RLIMIT_NPROC` applies per user ID to the whole host, not per sandbox;
+a true per-sandbox process cap requires cgroups (the systemd path). CPU quota
+is a resource-control feature rather than a host-isolation boundary; without
+systemd the `RLIMIT_CPU` cap applies but the percentage quota is not emulated.
+`private` networking is fail-closed because pasta and the sandbox must share
+the resource scope.
 
 ## Seccomp evaluation
 
@@ -197,7 +205,7 @@ namespaces and the absence of capabilities rather than a syscall filter.
   side-channel attacks.
 - **Kernel vulnerabilities:** the sandbox has no seccomp layer, so kernel
   vulnerabilities reachable from allowed syscalls are in scope.
-- **Non-Linux platforms:** the runtime backend is Linux-only (see below).
+- **Non-Linux platforms:** the runtime is Linux-only (see below).
 
 ## Code-level boundary markers
 
@@ -205,15 +213,13 @@ namespaces and the absence of capabilities rather than a syscall filter.
   from trusted `realm.nix` evaluation results (outside sandbox). Callers must
   treat the configuration as trusted.
 - **Mount boundary:** `nix::user_mounts` normalizes and validates host/guest
-  paths as a tree; `nix::config_guard_mount` pins the config file read-only when
-  it is inside a writable workspace.
+  paths as a tree; `nix::config_guard_mount` pins the config's directory and
+  file read-only when they are inside a writable workspace.
 - **Runtime boundary:** `sandbox::run` is the only entry point that launches the
   contained agent; `sandbox::cgroup::exec_with_limits`/bwrap enforce containment
   and the resource failure policy.
 - **Environment boundary:** `sandbox::bwrap::build_command` clears the bwrap
   process environment; wrapper paths use `sandbox::cgroup::clean_bwrap_command`.
-- **Extension point:** `sandbox::backend` defines `SandboxBackend` for future
-  backends without moving Nix eval/build inside the current sandbox.
 
 # Platform Support
 
@@ -222,6 +228,3 @@ namespaces and the absence of capabilities rather than a syscall filter.
 - **Nix outputs:** `flake.nix` defines the Realm package, app, checks, and
   development shell. Sandbox definitions live in `realm.nix`, independently of
   those outputs.
-- **Backends:** The backend is abstracted in `sandbox::backend` to allow future
-  platform-specific implementations without conflating "Nix platform support"
-  with "runtime sandbox capability".

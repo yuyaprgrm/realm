@@ -22,6 +22,11 @@ pub fn build_spec(config: &std::path::Path, sandbox_name: &str) -> Result<Sandbo
     realize::realize_packages(&sandbox_cfg.packages)?;
     let out_paths: Vec<String> = sandbox_cfg.packages.iter().map(|p| p.out.clone()).collect();
     let closure_paths = closure::get_closure(&out_paths)?;
+    if !out_paths.is_empty() && closure_paths.is_empty() {
+        return Err(crate::error::Error::Nix(
+            "package closure could not be read: nix path-info returned no /nix/store paths".into(),
+        ));
+    }
 
     // Workspace and configuration are separate trust decisions. The workspace
     // defaults to the current directory for compatibility, but can be moved
@@ -67,7 +72,6 @@ fn build_bwrap_spec(
     use crate::error::Error;
     use crate::sandbox::etc::GuestFs;
     use crate::sandbox::spec::{Mount, NetworkMode, ResourceLimits, SandboxSpec};
-    use std::collections::HashSet;
     use std::path::PathBuf;
 
     let network = match cfg.network.as_deref() {
@@ -97,20 +101,16 @@ fn build_bwrap_spec(
         target: PathBuf::from("/nix/store"),
     });
     // bind closure paths readonly
-    let mut seen = HashSet::new();
     for p in closure_paths {
         let pb = PathBuf::from(p);
-        if seen.contains(p) {
-            continue;
-        }
-        seen.insert(p.clone());
         mounts.push(Mount::ReadOnly {
             source: pb.clone(),
             target: pb,
         });
     }
     // sandbox-local /etc, /bin/sh and /usr/bin/env (host /etc,/bin,/usr never exposed)
-    let guest = GuestFs::new(network, closure_paths.iter().cloned().collect(), uid, gid)?;
+    let package_roots = cfg.packages.iter().map(|p| p.out.clone()).collect();
+    let guest = GuestFs::new(network, package_roots, uid, gid)?;
     mounts.extend(guest.mounts()?);
     // dirs
     mounts.push(Mount::Dir {
@@ -132,8 +132,9 @@ fn build_bwrap_spec(
     });
     // Workspace is intentionally writable by default, but the mode and host
     // path are explicit policy. The sandbox configuration file is a separate
-    // trust input; when it lives inside the workspace, pin a read-only view
-    // over it so the agent cannot rewrite the next host-side evaluation.
+    // trust input; when it lives inside the workspace, pin its parent
+    // directory read-only so the agent can neither rewrite the file nor rename
+    // the directory that holds it.
     mounts.push(if workspace_read_only {
         Mount::ReadOnly {
             source: workspace_host.clone(),
@@ -154,15 +155,14 @@ fn build_bwrap_spec(
     env.push(("HOME".to_string(), "/home/sandbox".to_string()));
     env.push(("TMPDIR".to_string(), "/tmp".to_string()));
     env.push(("PWD".to_string(), "/workspace".to_string()));
-    // build PATH from top-level package bin dirs
+    // build PATH from the listed packages, then their propagated outputs
     let mut path_bins: Vec<PathBuf> = Vec::new();
     for pkg in &cfg.packages {
-        let b = PathBuf::from(&pkg.out).join("bin");
-        if b.exists() {
-            path_bins.push(b);
-        } else {
-            // still allow adding if it might exist; bwrap will fail later if not critical - but better be strict? MVP be lenient
-            path_bins.push(b);
+        path_bins.push(PathBuf::from(&pkg.out).join("bin"));
+    }
+    for group in &cfg.propagated {
+        for out in group {
+            path_bins.push(PathBuf::from(out).join("bin"));
         }
     }
     let path_str = path_bins
@@ -204,7 +204,6 @@ fn build_bwrap_spec(
         mounts,
         env,
         cwd: PathBuf::from("/workspace"),
-        path_bins,
         executable: exe,
         args: vec!["-i".to_string()],
         network,
@@ -287,22 +286,51 @@ fn normalized_host_path(path: &std::path::Path, kind: &str) -> Result<std::path:
     Ok(canonical)
 }
 
-/// Pin a read-only mount over the configuration file when it is part of the
-/// writable workspace. The agent can still modify other files (and anything
-/// the configuration imports); this is a targeted guard, not a sandbox for an
-/// untrusted configuration.
-fn config_guard_mount(workspace_host: &std::path::Path, config: &std::path::Path) -> Option<Mount> {
-    use std::path::Path;
-    use std::path::PathBuf;
+/// Pin the configuration's directory read-only when it is part of the
+/// writable workspace. The directory becomes a mountpoint, so it cannot be
+/// renamed, and the file cannot be rewritten. Ancestors between the workspace
+/// and that directory are re-bound read-write on themselves: they stay
+/// writable but also become mountpoints, so renaming one cannot move the
+/// guard away. A final file-level overlay keeps the config itself read-only.
+fn config_guard_mount(workspace_host: &std::path::Path, config: &std::path::Path) -> Vec<Mount> {
+    use std::path::{Path, PathBuf};
 
-    let relative = config.strip_prefix(workspace_host).ok()?;
+    let Ok(relative) = config.strip_prefix(workspace_host) else {
+        return Vec::new();
+    };
     if relative.as_os_str().is_empty() || relative == Path::new(".") {
-        return None;
+        return Vec::new();
     }
-    Some(Mount::ReadOnly {
+    let Some(parent) = config.parent() else {
+        return Vec::new();
+    };
+    let relative_parent = relative.parent().unwrap_or(Path::new(""));
+    let file_guard = Mount::ReadOnly {
         source: config.to_path_buf(),
         target: PathBuf::from("/workspace").join(relative),
-    })
+    };
+    // A config directly in the workspace root already sits below a mountpoint
+    // (`/workspace`), so only the file needs the extra read-only overlay.
+    if relative_parent.as_os_str().is_empty() {
+        return vec![file_guard];
+    }
+
+    let components = relative_parent.components().collect::<Vec<_>>();
+    let mut mounts = Vec::new();
+    let mut ancestor = PathBuf::new();
+    for component in &components[..components.len().saturating_sub(1)] {
+        ancestor.push(component);
+        mounts.push(Mount::ReadWrite {
+            source: workspace_host.join(&ancestor),
+            target: PathBuf::from("/workspace").join(&ancestor),
+        });
+    }
+    mounts.push(Mount::ReadOnly {
+        source: parent.to_path_buf(),
+        target: PathBuf::from("/workspace").join(relative_parent),
+    });
+    mounts.push(file_guard);
+    mounts
 }
 
 fn paths_overlap(a: &std::path::Path, b: &std::path::Path) -> bool {
@@ -631,21 +659,61 @@ mod mount_tests {
     }
 
     #[test]
-    fn configuration_inside_a_writable_workspace_is_pinned_read_only() {
+    fn configuration_inside_a_writable_workspace_pins_its_directory() {
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("workspace");
         let config = workspace.join("nix/realm.nix");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "").unwrap();
 
-        let guard = config_guard_mount(&workspace, &config).unwrap();
+        let guard = config_guard_mount(&workspace, &config);
+        assert_eq!(guard.len(), 2);
         assert!(matches!(
-            guard,
-            Mount::ReadOnly { ref source, ref target }
+            &guard[0],
+            Mount::ReadOnly { source, target }
+                if source == config.parent().unwrap()
+                    && target == std::path::Path::new("/workspace/nix")
+        ));
+        assert!(matches!(
+            &guard[1],
+            Mount::ReadOnly { source, target }
                 if source == &config
                     && target == std::path::Path::new("/workspace/nix/realm.nix")
         ));
 
-        assert!(config_guard_mount(&workspace, &root.path().join("other.nix")).is_none());
+        let deep = workspace.join("a/b/c/realm.nix");
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&deep, "").unwrap();
+        let guard = config_guard_mount(&workspace, &deep);
+        assert_eq!(guard.len(), 4);
+        assert!(matches!(
+            &guard[0],
+            Mount::ReadWrite { source, target }
+                if source == &workspace.join("a") && target == std::path::Path::new("/workspace/a")
+        ));
+        assert!(matches!(
+            &guard[1],
+            Mount::ReadWrite { source, target }
+                if source == &workspace.join("a/b")
+                    && target == std::path::Path::new("/workspace/a/b")
+        ));
+        assert!(matches!(
+            &guard[2],
+            Mount::ReadOnly { source, target }
+                if source == &workspace.join("a/b/c")
+                    && target == std::path::Path::new("/workspace/a/b/c")
+        ));
+
+        let direct = workspace.join("realm.nix");
+        std::fs::write(&direct, "").unwrap();
+        let guard = config_guard_mount(&workspace, &direct);
+        assert_eq!(guard.len(), 1);
+        assert!(matches!(
+            &guard[0],
+            Mount::ReadOnly { source, target }
+                if source == &direct && target == std::path::Path::new("/workspace/realm.nix")
+        ));
+
+        assert!(config_guard_mount(&workspace, &root.path().join("other.nix")).is_empty());
     }
 }

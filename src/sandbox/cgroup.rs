@@ -1,9 +1,8 @@
 use crate::error::{Error, Result};
 use crate::sandbox::bwrap;
 use crate::sandbox::spec::{NetworkMode, SandboxSpec};
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 /// How resource limits will be enforced for this launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,38 +34,35 @@ fn select_limit_plan(spec: &SandboxSpec, systemd_available: bool) -> Result<Limi
 
 /// Run the sandbox, applying resource limits via a transient systemd scope
 /// (`systemd-run --user --scope`) when available.
-pub fn exec_with_limits(spec: &SandboxSpec) -> Result<()> {
+pub fn exec_with_limits(spec: &SandboxSpec) -> Result<ExitStatus> {
     let bwrap = bwrap::build_command(spec)?;
     let plan = select_limit_plan(spec, systemd_user_scope_available())?;
 
-    if spec.network == NetworkMode::Private {
+    let mut cmd = if spec.network == NetworkMode::Private {
         let pasta_path = crate::sandbox::network::require_pasta()?;
         let clean_bwrap = clean_bwrap_command(&bwrap)?;
         // pasta starts in the background and configures a user/network namespace
-        // for its caller. Run it inside the scope, then have bwrap join that
-        // namespace instead of creating a disconnected one of its own.
+        // for its caller. Run it inside the scope, then have it launch bwrap in
+        // that namespace instead of creating a disconnected one of its own.
         let pasta = private_network_command(&pasta_path, &clean_bwrap);
-        let mut cmd = systemd_wrapper(spec, &pasta);
-        let err = cmd.exec();
-        return Err(Error::Bwrap(format!("exec failed: {}", err)));
-    }
-
-    let mut cmd = match plan {
-        LimitPlan::SystemdScope => {
-            let clean_bwrap = clean_bwrap_command(&bwrap)?;
-            systemd_wrapper(spec, &clean_bwrap)
-        }
-        LimitPlan::RlimitFallback => {
-            let mut c = bwrap;
-            apply_fallback_timeout(&mut c, spec)?;
-            bwrap::apply_rlimits(&mut c, spec)?;
-            c
+        systemd_wrapper(spec, &pasta)
+    } else {
+        match plan {
+            LimitPlan::SystemdScope => {
+                let clean_bwrap = clean_bwrap_command(&bwrap)?;
+                systemd_wrapper(spec, &clean_bwrap)
+            }
+            LimitPlan::RlimitFallback => {
+                let mut c = bwrap;
+                apply_fallback_timeout(&mut c, spec)?;
+                bwrap::apply_rlimits(&mut c, spec)?;
+                c
+            }
         }
     };
 
-    // exec() only returns on failure.
-    let err = cmd.exec();
-    Err(Error::Bwrap(format!("exec failed: {}", err)))
+    cmd.status()
+        .map_err(|error| Error::Bwrap(format!("spawn failed: {error}")))
 }
 
 /// Execute bwrap with an empty environment. `build_command` already clears the
@@ -138,11 +134,7 @@ fn private_network_command(pasta_path: &std::path::Path, bwrap: &Command) -> Com
         .arg("--udp-ns")
         .arg("none");
     pasta.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    let mut helper = Command::new("/bin/sh");
-    helper.arg("-c").arg("exec \"$@\"").arg("realm-pasta");
-    helper.arg(bwrap.get_program());
-    helper.args(bwrap.get_args());
-    pasta.arg(helper.get_program()).args(helper.get_args());
+    pasta.arg(bwrap.get_program()).args(bwrap.get_args());
     pasta
 }
 
@@ -180,16 +172,15 @@ fn systemd_wrapper(spec: &SandboxSpec, bwrap: &Command) -> Command {
     cmd
 }
 
-/// Whether `systemd-run --user` can reach a user manager.
+/// Whether `systemd-run --user` can actually create a user scope.
 fn systemd_user_scope_available() -> bool {
-    if which::which("systemd-run").is_err() {
-        return false;
-    }
-    // `systemd-run --user` needs a session/user bus.
-    std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
-        || std::env::var_os("XDG_RUNTIME_DIR")
-            .map(|d| std::path::Path::new(&d).join("systemd/private").exists())
-            .unwrap_or(false)
+    Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "true"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -202,7 +193,6 @@ mod tests {
             mounts: vec![],
             env: vec![],
             cwd: "/".into(),
-            path_bins: vec![],
             executable: "/bin/true".into(),
             args: vec![],
             network: NetworkMode::None,

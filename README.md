@@ -125,10 +125,16 @@ the configuration outside it:
 `workspace.host` must be an absolute directory and follows the same host-path
 rules as `mounts` (no symlinks).
 
-When the configuration file is inside a writable workspace, Realm pins a
-read-only mount over that file inside the sandbox. This prevents the agent from
-rewriting the configuration itself, but not other files it imports. For full
-protection, use `mode = "ro"` or keep the configuration outside the workspace.
+When the configuration file is inside a writable workspace, Realm pins the
+directory that holds it read-only inside the sandbox. That directory becomes a
+mountpoint, so it cannot be renamed, and the configuration file is also overlaid
+read-only. Directories between the workspace and that directory are made
+mountpoints too, without becoming read-only, so an ancestor cannot be renamed
+to move the guard away. When the file sits directly in the workspace root, only
+the file overlay is needed because `/workspace` is already a mountpoint. This
+prevents the agent from rewriting the configuration itself, but not other files
+it imports. For full protection, use `mode = "ro"` or keep the configuration
+outside the workspace.
 
 Nix still evaluates package derivations, realizes them, and calculates their
 runtime closure. The sandbox configuration no longer needs to be a flake output.
@@ -145,11 +151,14 @@ Resource limits have an explicit failure policy:
 
 - With a systemd user scope, memory, CPU quota, task count, and wall-clock
   time are enforced by cgroup v2.
-- Without systemd, `none` and `host` use `setrlimit` for memory, file size,
+- Without systemd, `none` and `host` use `setrlimit` for address space,
   process count, and CPU time, plus the coreutils `timeout` command for the
   wall-clock limit. If any of these cannot be installed, the sandbox refuses
-  to start (fail-closed). CPU quota is not enforceable by rlimits and is
-  degraded to the CPU-time cap in this mode.
+  to start (fail-closed). `RLIMIT_AS` limits address space, not resident
+  memory. CPU quota is not enforceable by rlimits and is degraded to the
+  CPU-time cap. The process cap is `RLIMIT_NPROC`, which applies per user ID
+  to the whole host (512 by default), not per sandbox; a true per-sandbox
+  process cap needs cgroups, i.e. the systemd path.
 - `private` always requires systemd and fails closed without it.
 - Set `requireCgroup = true` to refuse all modes when no systemd scope is
   available.
@@ -184,7 +193,10 @@ nix flake check
 
 Network integration tests make real namespace and localhost checks and require a
 Linux host that permits user namespace creation, localhost binding, Nix
-evaluation, a `nixpkgs` registry entry, and a systemd user manager.
+evaluation, a `nixpkgs` registry entry, and a systemd user manager. `nix flake
+check` runs them as part of the package checks; the tests print a `SKIP` reason
+when the build sandbox does not provide these capabilities. In `nix develop`
+they run against the host when the same capabilities are available.
 
 The test suite always checks that `none` and `private` cannot reach a host-local
 HTTP server while `host` can. It attempts external HTTPS in Private mode when

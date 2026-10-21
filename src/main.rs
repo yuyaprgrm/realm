@@ -13,9 +13,6 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    Ok(realm::sandbox::run(
-        &args.config,
-        &args.sandbox,
-        &args.command,
-    )?)
+    let code = realm::sandbox::run(&args.config, &args.sandbox, &args.command)?;
+    std::process::exit(code);
 }

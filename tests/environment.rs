@@ -1,3 +1,5 @@
+mod common;
+
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -65,6 +67,9 @@ fn assert_success(output: &Output) -> String {
 
 #[test]
 fn host_environment_is_not_visible_in_the_sandbox_or_proc_one() {
+    if !common::sandbox_available("environment") {
+        return;
+    }
     let fixture = Fixture::new();
     let host_marker = format!("host-secret-{}", std::process::id());
     let output = fixture.run(

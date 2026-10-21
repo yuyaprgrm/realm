@@ -52,7 +52,8 @@ impl NetworkMode {
 /// Resource limits applied to the sandbox process tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceLimits {
-    /// Total memory cap in bytes (cgroup `MemoryMax`).
+    /// Cgroup `MemoryMax` in bytes. The rlimit fallback enforces
+    /// `RLIMIT_AS`, which caps address space rather than resident memory.
     pub memory_bytes: u64,
     /// CPU quota as a percentage of one core (cgroup `CPUQuota`).
     pub cpu_percent: u32,
@@ -85,7 +86,6 @@ pub struct SandboxSpec {
     pub mounts: Vec<Mount>,
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
-    pub path_bins: Vec<PathBuf>,
     pub executable: PathBuf,
     pub args: Vec<String>,
     pub network: NetworkMode,

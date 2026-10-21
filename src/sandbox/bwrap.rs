@@ -96,19 +96,17 @@ fn build_command_with(bwrap: &Path, spec: &SandboxSpec) -> Result<Command> {
 }
 
 /// Apply fallback rlimits in the child before exec. Used when no cgroup
-/// wrapper is available. Memory, file size, process count, and CPU-time are
+/// wrapper is available. Address space, process count, and CPU-time are
 /// mandatory in this mode: if a limit cannot be installed, exec fails instead
 /// of running with silently weaker limits (fail-closed).
 pub fn apply_rlimits(cmd: &mut Command, spec: &SandboxSpec) -> Result<()> {
     let mem = spec.limits.memory_bytes;
     let cpu = spec.limits.timeout_secs.unwrap_or(0);
     let nproc = spec.limits.max_pids as u64;
-    let fsize = spec.limits.tmpfs_bytes;
 
     unsafe {
         cmd.pre_exec(move || {
             set_limit(libc::RLIMIT_AS, mem)?;
-            set_limit(libc::RLIMIT_FSIZE, fsize)?;
             set_limit(libc::RLIMIT_NPROC, nproc)?;
             set_limit(libc::RLIMIT_CPU, cpu)?;
             Ok(())
@@ -169,7 +167,6 @@ mod tests {
             ],
             env: vec![],
             cwd: "/".into(),
-            path_bins: vec![],
             executable: "/bin/sh".into(),
             args: vec![],
             network: NetworkMode::None,
@@ -239,5 +236,19 @@ mod tests {
         let private_args = args_with(&s);
         assert!(private_args.contains(&"--unshare-user".to_string()));
         assert!(private_args.contains(&"--disable-userns".to_string()));
+    }
+
+    #[test]
+    fn fallback_rlimits_stop_a_child_that_exceeds_them() {
+        let mut s = spec();
+        s.limits.timeout_secs = Some(1);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("while :; do :; done");
+        apply_rlimits(&mut cmd, &s).unwrap();
+        let status = cmd.status().unwrap();
+        assert!(
+            !status.success(),
+            "child exceeded the CPU limit but still succeeded"
+        );
     }
 }

@@ -1,3 +1,5 @@
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -112,6 +114,9 @@ fn assert_success(output: &Output) -> String {
 
 #[test]
 fn read_only_mount_is_readable_but_not_writable() {
+    if !common::sandbox_available("mounts") {
+        return;
+    }
     let fixture = Fixture::new();
     let output = fixture.run(
         r#"
@@ -139,6 +144,9 @@ echo ro:done
 
 #[test]
 fn read_write_mount_writes_reach_the_host_and_undeclared_paths_stay_hidden() {
+    if !common::sandbox_available("mounts") {
+        return;
+    }
     let fixture = Fixture::new();
     let output = fixture.run(
         r#"
@@ -171,6 +179,9 @@ echo rw:done
 
 #[test]
 fn mount_under_reserved_home_path_is_allowed() {
+    if !common::sandbox_available("mounts") {
+        return;
+    }
     let fixture = Fixture::with_mounts(&[("cfg", "/home/sandbox/.config/probe", "rw")]);
     let output = fixture.run(
         r#"
@@ -191,6 +202,9 @@ echo nested:done
 
 #[test]
 fn mount_replacing_reserved_home_path_is_rejected() {
+    if !common::sandbox_available("mounts") {
+        return;
+    }
     let fixture = Fixture::with_mounts(&[("cfg", "/home", "rw")]);
     let output = fixture.run("true");
     assert!(!output.status.success(), "expected reserved path rejection");
@@ -200,6 +214,9 @@ fn mount_replacing_reserved_home_path_is_rejected() {
 
 #[test]
 fn workspace_is_rw_but_the_configuration_file_is_pinned_read_only() {
+    if !common::sandbox_available("mounts") {
+        return;
+    }
     let fixture = Fixture::new();
     let output = fixture.run_from_workspace(
         r#"

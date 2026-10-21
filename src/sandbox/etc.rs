@@ -11,17 +11,17 @@ use std::path::{Path, PathBuf};
 pub struct GuestFs {
     root: tempfile::TempDir,
     network: NetworkMode,
-    closure: Vec<String>,
+    packages: Vec<String>,
     uid: u32,
     gid: u32,
 }
 
 impl GuestFs {
-    pub fn new(network: NetworkMode, closure: Vec<String>, uid: u32, gid: u32) -> Result<Self> {
+    pub fn new(network: NetworkMode, packages: Vec<String>, uid: u32, gid: u32) -> Result<Self> {
         Ok(Self {
             root: tempfile::tempdir()?,
             network,
-            closure,
+            packages,
             uid,
             gid,
         })
@@ -111,25 +111,26 @@ impl GuestFs {
     }
 
     /// `/bin/sh` and `/usr/bin/env` pointing at a shell/coreutils from the
-    /// closure, so `#!/bin/sh` and `#!/usr/bin/env bash` scripts work without
-    /// exposing the host `/bin` or `/usr/bin`.
+    /// listed packages, in configuration order, so `#!/bin/sh` and
+    /// `#!/usr/bin/env bash` scripts work without exposing the host `/bin` or
+    /// `/usr/bin`.
     fn write_compat_links(&self) -> Result<()> {
         let bin = self.root.path().join("bin");
         let usr_bin = self.root.path().join("usr/bin");
         std::fs::create_dir_all(&bin)?;
         std::fs::create_dir_all(&usr_bin)?;
-        if let Some(sh) = self.find_in_closure(&["/bin/bash", "/bin/sh"]) {
+        if let Some(sh) = self.find_in_packages(&["/bin/bash", "/bin/sh"]) {
             std::os::unix::fs::symlink(&sh, bin.join("sh"))?;
         }
-        if let Some(env) = self.find_in_closure(&["/bin/env"]) {
+        if let Some(env) = self.find_in_packages(&["/bin/env"]) {
             std::os::unix::fs::symlink(&env, usr_bin.join("env"))?;
         }
         Ok(())
     }
 
-    /// First closure path that contains any of `candidates` (e.g. `/bin/bash`).
-    fn find_in_closure(&self, candidates: &[&str]) -> Option<PathBuf> {
-        for p in &self.closure {
+    /// First listed package that contains any of `candidates` (e.g. `/bin/bash`).
+    fn find_in_packages(&self, candidates: &[&str]) -> Option<PathBuf> {
+        for p in &self.packages {
             for c in candidates {
                 let full = Path::new(p).join(c.trim_start_matches('/'));
                 if full.exists() {
@@ -140,14 +141,14 @@ impl GuestFs {
         None
     }
 
-    /// A CA bundle in the closure, if any (`.../etc/ssl/certs/ca-bundle.crt`).
+    /// A CA bundle in the listed packages, if any (`.../etc/ssl/certs/ca-bundle.crt`).
     fn find_ca_bundle(&self) -> Option<PathBuf> {
         const CANDIDATES: &[&str] = &[
             "etc/ssl/certs/ca-bundle.crt",
             "etc/ssl/certs/ca-certificates.crt",
             "etc/ssl/certs/ca-bundle.trust.crt",
         ];
-        self.closure.iter().map(PathBuf::from).find_map(|p| {
+        self.packages.iter().map(PathBuf::from).find_map(|p| {
             CANDIDATES
                 .iter()
                 .map(|c| p.join(c))
@@ -201,15 +202,15 @@ mod tests {
     }
 
     #[test]
-    fn links_shell_from_closure() {
+    fn links_shell_from_listed_packages() {
         // fake a store entry containing bin/bash and bin/env
         let store = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(store.path().join("bin")).unwrap();
         std::fs::write(store.path().join("bin/bash"), "").unwrap();
         std::fs::write(store.path().join("bin/env"), "").unwrap();
-        let closure = vec![store.path().display().to_string()];
+        let packages = vec![store.path().display().to_string()];
 
-        let g = GuestFs::new(NetworkMode::None, closure, 1000, 1000).unwrap();
+        let g = GuestFs::new(NetworkMode::None, packages, 1000, 1000).unwrap();
         let _ = g.mounts().unwrap();
         assert_eq!(
             std::fs::read_link(g.root.path().join("bin/sh")).unwrap(),

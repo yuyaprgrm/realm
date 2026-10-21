@@ -1,3 +1,5 @@
+mod common;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::MetadataExt;
@@ -136,6 +138,9 @@ if test "$(stat -Lc %d:%i /dev)" = "{}:{}"; then echo dev:shared; else echo dev:
 
 #[test]
 fn none_has_no_interfaces_routes_dns_or_internet() {
+    if !common::sandbox_available("network_modes::none") {
+        return;
+    }
     let server = HostLocalServer::start();
     let script = format!(
         r#"{isolation}
@@ -170,6 +175,9 @@ if curl --silent --show-error --connect-timeout 2 http://127.0.0.1:{port}/ >/dev
 
 #[test]
 fn private_has_network_dns_internet_and_cannot_reach_host_localhost() {
+    if !common::private_network_available("network_modes::private") {
+        return;
+    }
     let server = HostLocalServer::start();
     let require_external_https = std::env::var_os("REALM_TEST_REQUIRE_EXTERNAL_HTTPS").is_some();
 
@@ -214,6 +222,9 @@ if curl --silent --show-error --connect-timeout 2 http://127.0.0.1:{port}/ >/dev
 
 #[test]
 fn host_shares_network_namespace_and_host_loopback() {
+    if !common::sandbox_available("network_modes::host") {
+        return;
+    }
     let server = HostLocalServer::start();
     let script = format!(
         r#"{isolation}
@@ -238,6 +249,9 @@ if curl --silent --show-error --connect-timeout 3 http://127.0.0.1:{port}/ >/dev
 
 #[test]
 fn private_is_launched_with_resource_limits() {
+    if !common::private_network_available("network_modes::limits") {
+        return;
+    }
     let script = "sleep 10";
     let mut child = Command::new(env!("CARGO_BIN_EXE_realm"))
         .args([

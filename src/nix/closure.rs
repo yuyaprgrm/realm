@@ -30,19 +30,23 @@ pub fn get_closure(roots: &[String]) -> Result<HashSet<String>> {
         )));
     }
     let s = String::from_utf8(out.stdout).map_err(|e| Error::Nix(e.to_string()))?;
+    Ok(parse_paths(&s))
+}
+
+/// Parse `nix path-info` output: one store path per line, then optional columns.
+fn parse_paths(text: &str) -> HashSet<String> {
     let mut closure = HashSet::new();
-    for line in s.lines() {
+    for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        // `nix path-info` is tab-separated: path, then optional columns
         let tok = line.split_whitespace().next().unwrap_or(line);
         if tok.starts_with("/nix/store/") {
             closure.insert(tok.to_string());
         }
     }
-    Ok(closure)
+    closure
 }
 
 #[cfg(test)]
@@ -58,13 +62,7 @@ mod tests {
     fn parses_store_paths_from_path_info_lines() {
         // mirrors `nix path-info --recursive` output: path + tab columns
         let lines = "/nix/store/aaa-x\t{\"narSize\":123}\n/nix/store/bbb-y\t{\"narSize\":4}\n";
-        let mut closure = HashSet::new();
-        for line in lines.lines() {
-            let tok = line.split_whitespace().next().unwrap_or(line);
-            if tok.starts_with("/nix/store/") {
-                closure.insert(tok.to_string());
-            }
-        }
+        let closure = parse_paths(lines);
         assert_eq!(closure.len(), 2);
         assert!(closure.contains("/nix/store/aaa-x"));
     }
