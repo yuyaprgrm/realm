@@ -66,9 +66,24 @@ in
     packages = with pkgs; [ bash coreutils curl cacert ];
     env = { FOO = "bar"; };
     network = "private"; # "none", "private", or "host"
+    mounts = [
+      {
+        host = "/host/path";
+        guest = "/sandbox/path";
+        mode = "ro"; # "ro" or "rw"
+      }
+    ];
   };
 }
 ```
+
+`mounts` explicitly exposes host paths inside the sandbox. Only the listed
+paths are visible: `ro` mounts are read-only, `rw` mounts are writable, and
+guest parent directories are created automatically. Host and guest paths must
+be absolute, must not be `/` or contain `..`, and host paths must not contain
+symlinks. Guest targets must not overlap each other or the built-in `/nix`,
+`/etc`, `/bin`, `/usr`, `/workspace`, `/tmp`, `/proc`, `/dev`, and `/home`
+trees.
 
 Nix still evaluates package derivations, realizes them, and calculates their
 runtime closure. The sandbox configuration no longer needs to be a flake output.

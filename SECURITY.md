@@ -24,7 +24,7 @@ trusted sandbox configuration
 - **Namespaces:** user/pid/uts/ipc/net/cgroup, `--new-session`, `--disable-userns` where available.
 - **Capabilities:** dropped (no new privileges), `CapEff` zero inside the sandbox.
 - **Devices:** minimal `/dev` via bwrap (`--dev`), no host device nodes bound.
-- **Filesystem exposure:** no host `/home`, `/etc`, `/bin`, `/usr` bind mounts; generated guest `/etc` + compatibility symlinks; only closure paths + workspace bound read-only/read-write as needed. Host Nix store paths are read-only; new writes in `/nix/store` cannot reach the host store.
+- **Filesystem exposure:** no host `/home`, `/etc`, `/bin`, `/usr` bind mounts; generated guest `/etc` + compatibility symlinks; only closure paths + workspace bound read-only/read-write as needed. Additional host paths are exposed only when listed explicitly in `mounts` (`ro` or `rw`), with validated absolute paths, no symlinks or `..`, and no overlap with built-in or other guest mounts. Host Nix store paths are read-only; new writes in `/nix/store` cannot reach the host store.
 - **Resources:** cgroup v2 limits via transient systemd user scope (memory, CPU, tasks/pids, and wall-clock time) with `setrlimit` fallback when systemd is unavailable; `/tmp` and `/home/sandbox` tmpfs size-limited.
 - **Network:** `None` has no network namespace access, `Private` uses a pasta-backed private namespace, and `Host` shares the host network namespace. DNS/CA material is only prepared when network access is allowed. Private mode requires a working systemd user manager so its resource scope can contain pasta and the sandbox together.
 - **Process isolation:** `--die-with-parent` prevents orphaned processes escaping cleanup.

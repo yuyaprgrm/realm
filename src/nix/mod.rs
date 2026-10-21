@@ -4,7 +4,7 @@ pub mod realize;
 
 use crate::error::Result;
 use crate::nix::eval::SandboxCfg;
-use crate::sandbox::spec::SandboxSpec;
+use crate::sandbox::spec::{BindMount, Mount, SandboxSpec};
 
 pub fn build_spec(config: &std::path::Path, sandbox_name: &str) -> Result<SandboxSpec> {
     let config = if config.is_absolute() {
@@ -143,6 +143,7 @@ fn build_bwrap_spec(
     mounts.push(Mount::Tmpfs {
         target: PathBuf::from("/home/sandbox"),
     });
+    mounts.extend(user_mounts(&cfg.mounts)?);
 
     Ok(SandboxSpec {
         mounts,
@@ -157,4 +158,231 @@ fn build_bwrap_spec(
         gid,
         keep_alive: vec![guest],
     })
+}
+
+// User mounts must not replace or nest under the built-in isolation trees.
+const RESERVED_GUEST_PATHS: &[&str] = &[
+    "/nix",
+    "/etc",
+    "/bin",
+    "/usr",
+    "/workspace",
+    "/tmp",
+    "/proc",
+    "/dev",
+    "/home",
+];
+
+fn normalize_declared_path(path: &std::path::Path, kind: &str) -> Result<std::path::PathBuf> {
+    use crate::error::Error;
+    use std::path::{Component, Path, PathBuf};
+
+    if path.as_os_str().is_empty() {
+        return Err(Error::Spec(format!("mount {kind} path must not be empty")));
+    }
+    if !path.is_absolute() {
+        return Err(Error::Spec(format!(
+            "mount {kind} path must be absolute: {}",
+            path.display()
+        )));
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => normalized.push("/"),
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(Error::Spec(format!(
+                    "mount {kind} path must not contain \"..\": {}",
+                    path.display()
+                )));
+            }
+            Component::Prefix(_) => {
+                return Err(Error::Spec(format!(
+                    "mount {kind} path is not a Linux path: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if normalized == Path::new("/") {
+        return Err(Error::Spec(format!(
+            "mount {kind} path must not be the filesystem root"
+        )));
+    }
+    Ok(normalized)
+}
+
+fn normalized_host_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    use crate::error::Error;
+
+    let declared = normalize_declared_path(path, "host")?;
+    let canonical = std::fs::canonicalize(&declared).map_err(|error| {
+        Error::Spec(format!(
+            "mount host path {} is not accessible: {error}",
+            declared.display()
+        ))
+    })?;
+    if canonical != declared {
+        return Err(Error::Spec(format!(
+            "mount host path {} resolves to {}; symlinks are not allowed",
+            declared.display(),
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+fn paths_overlap(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a == b || a.starts_with(b) || b.starts_with(a)
+}
+
+fn user_mounts(bindings: &[BindMount]) -> Result<Vec<Mount>> {
+    use crate::error::Error;
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    let mut normalized = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let host = normalized_host_path(&binding.host)?;
+        let guest = normalize_declared_path(&binding.guest, "guest")?;
+        for reserved in RESERVED_GUEST_PATHS {
+            let reserved = Path::new(reserved);
+            if paths_overlap(&guest, reserved) {
+                return Err(Error::Spec(format!(
+                    "mount guest path {} overlaps reserved sandbox path {}",
+                    guest.display(),
+                    reserved.display()
+                )));
+            }
+        }
+        normalized.push((host, guest, binding.read_only));
+    }
+
+    for (i, (_, guest, _)) in normalized.iter().enumerate() {
+        for (_, other, _) in normalized.iter().skip(i + 1) {
+            if paths_overlap(guest, other) {
+                return Err(Error::Spec(format!(
+                    "mount guest paths {} and {} overlap",
+                    guest.display(),
+                    other.display()
+                )));
+            }
+        }
+    }
+
+    let mut mounts = Vec::new();
+    let mut created_dirs = HashSet::new();
+    for (host, guest, read_only) in normalized {
+        let mut parents = guest.ancestors().skip(1).collect::<Vec<_>>();
+        parents.reverse();
+        for parent in parents {
+            if parent == Path::new("/") {
+                continue;
+            }
+            if created_dirs.insert(parent.to_path_buf()) {
+                mounts.push(Mount::Dir {
+                    target: parent.to_path_buf(),
+                });
+            }
+        }
+        mounts.push(if read_only {
+            Mount::ReadOnly {
+                source: host,
+                target: guest,
+            }
+        } else {
+            Mount::ReadWrite {
+                source: host,
+                target: guest,
+            }
+        });
+    }
+    Ok(mounts)
+}
+
+#[cfg(test)]
+mod mount_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn bind(host: &std::path::Path, guest: &str, read_only: bool) -> BindMount {
+        BindMount {
+            host: host.to_path_buf(),
+            guest: PathBuf::from(guest),
+            read_only,
+        }
+    }
+
+    #[test]
+    fn creates_guest_parents_and_preserves_modes() {
+        let root = tempfile::tempdir().unwrap();
+        let ro = root.path().join("ro");
+        let rw = root.path().join("rw");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::create_dir(&rw).unwrap();
+
+        let mounts = user_mounts(&[
+            bind(&ro, "/sandbox/ro", true),
+            bind(&rw, "/sandbox/rw", false),
+        ])
+        .unwrap();
+        let args = mounts.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>();
+        assert_eq!(args.len(), 3, "{args:?}");
+        assert!(
+            matches!(mounts[0], Mount::Dir { ref target } if target == std::path::Path::new("/sandbox"))
+        );
+        assert!(
+            matches!(mounts[1], Mount::ReadOnly { ref source, ref target } if source == &ro && target == std::path::Path::new("/sandbox/ro"))
+        );
+        assert!(
+            matches!(mounts[2], Mount::ReadWrite { ref source, ref target } if source == &rw && target == std::path::Path::new("/sandbox/rw"))
+        );
+    }
+
+    #[test]
+    fn rejects_relative_and_traversal_paths() {
+        let root = tempfile::tempdir().unwrap();
+        for guest in ["relative", "/sandbox/../etc", "/", "/workspace/data"] {
+            let error = user_mounts(&[bind(root.path(), guest, true)]).unwrap_err();
+            assert!(error.to_string().contains("mount"), "{error}");
+        }
+        let error = user_mounts(&[BindMount {
+            host: PathBuf::from("relative"),
+            guest: PathBuf::from("/sandbox/data"),
+            read_only: true,
+        }])
+        .unwrap_err();
+        assert!(error.to_string().contains("mount"), "{error}");
+    }
+
+    #[test]
+    fn rejects_duplicate_and_parent_child_guest_paths() {
+        let root = tempfile::tempdir().unwrap();
+        for guests in [
+            ("/sandbox/a", "/sandbox/a"),
+            ("/sandbox", "/sandbox/a"),
+            ("/sandbox/a", "/sandbox/a/b"),
+        ] {
+            let error = user_mounts(&[
+                bind(root.path(), guests.0, true),
+                bind(root.path(), guests.1, false),
+            ])
+            .unwrap_err();
+            assert!(error.to_string().contains("overlap"), "{error}");
+        }
+    }
+
+    #[test]
+    fn rejects_symlinked_host_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let link = root.path().join("link");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let error = user_mounts(&[bind(&link, "/sandbox/data", true)]).unwrap_err();
+        assert!(error.to_string().contains("symlink"), "{error}");
+    }
 }

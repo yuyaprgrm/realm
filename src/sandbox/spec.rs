@@ -10,6 +10,14 @@ pub enum Mount {
     Dir { target: PathBuf },
 }
 
+/// Explicit host path bind mounted into the sandbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindMount {
+    pub host: PathBuf,
+    pub guest: PathBuf,
+    pub read_only: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkMode {
     /// No network access.

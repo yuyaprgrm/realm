@@ -25,6 +25,7 @@ rustPlatform.buildRustPackage {
     cargo fmt --all -- --check
     cargo clippy --locked --all-targets -- -D warnings
     cargo test --locked --lib
+    cargo test --locked --test mounts --no-run
     cargo test --locked --test network_modes --no-run
     runHook postCheck
   '';

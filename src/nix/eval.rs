@@ -1,6 +1,8 @@
 use crate::error::{Error, Result};
+use crate::sandbox::spec::BindMount;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -16,10 +18,11 @@ pub struct SandboxCfg {
     pub packages: Vec<Package>,
     pub env: HashMap<String, String>,
     pub network: Option<String>,
+    pub mounts: Vec<BindMount>,
 }
 
 // Nix evaluates realm.nix and package derivations outside the sandbox.
-const NORMALIZE: &str = "cfg: { packages = map (p: { out = builtins.toString p; drv = if builtins.isAttrs p && (p.type or \"\") == \"derivation\" then p.drvPath else null; }) cfg.packages; env = cfg.env or {}; network = cfg.network or null; }";
+const NORMALIZE: &str = "cfg: { packages = map (p: { out = builtins.toString p; drv = if builtins.isAttrs p && (p.type or \"\") == \"derivation\" then p.drvPath else null; }) cfg.packages; env = cfg.env or {}; network = cfg.network or null; mounts = map (m: { host = builtins.toString m.host; guest = builtins.toString m.guest; mode = builtins.toString m.mode; }) (cfg.mounts or []); }";
 
 pub fn eval_sandbox(config: &std::path::Path, name: &str) -> Result<SandboxCfg> {
     if name.is_empty()
@@ -107,10 +110,48 @@ fn parse_sandbox_json(bytes: &[u8]) -> Result<SandboxCfg> {
                 .to_string(),
         ),
     };
+    let mut mounts = Vec::new();
+    if let Some(m) = obj.get("mounts") {
+        let entries = m
+            .as_array()
+            .ok_or_else(|| Error::Nix("mounts must be array".into()))?;
+        for (i, entry) in entries.iter().enumerate() {
+            let o = entry
+                .as_object()
+                .ok_or_else(|| Error::Nix(format!("mounts[{i}] must be object")))?;
+            let host = o
+                .get("host")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| Error::Nix(format!("mounts[{i}].host must be string")))?;
+            let guest = o
+                .get("guest")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| Error::Nix(format!("mounts[{i}].guest must be string")))?;
+            let mode = o
+                .get("mode")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| Error::Nix(format!("mounts[{i}].mode must be string")))?;
+            let read_only = match mode {
+                "ro" => true,
+                "rw" => false,
+                other => {
+                    return Err(Error::Nix(format!(
+                        "mounts[{i}].mode must be \"ro\" or \"rw\", got \"{other}\""
+                    )));
+                }
+            };
+            mounts.push(BindMount {
+                host: PathBuf::from(host),
+                guest: PathBuf::from(guest),
+                read_only,
+            });
+        }
+    }
     Ok(SandboxCfg {
         packages: pkgs,
         env,
         network,
+        mounts,
     })
 }
 
@@ -161,5 +202,29 @@ mod tests {
         );
         let json = br#"{"packages":[{"out":"/nix/store/x"}],"env":{}}"#;
         assert_eq!(parse_sandbox_json(json).unwrap().network, None);
+    }
+
+    #[test]
+    fn parses_mounts() {
+        let json = br#"{"packages":[],"env":{},"mounts":[
+            {"host":"/host/ro","guest":"/sandbox/ro","mode":"ro"},
+            {"host":"/host/rw","guest":"/sandbox/rw","mode":"rw"}
+        ]}"#;
+        let cfg = parse_sandbox_json(json).unwrap();
+        assert_eq!(cfg.mounts.len(), 2);
+        assert_eq!(cfg.mounts[0].host, PathBuf::from("/host/ro"));
+        assert_eq!(cfg.mounts[0].guest, PathBuf::from("/sandbox/ro"));
+        assert!(cfg.mounts[0].read_only);
+        assert!(!cfg.mounts[1].read_only);
+
+        let json = br#"{"packages":[],"env":{},"mounts":[
+            {"host":"/host","guest":"/sandbox","mode":"rx"}
+        ]}"#;
+        assert!(
+            parse_sandbox_json(json)
+                .unwrap_err()
+                .to_string()
+                .contains("mode")
+        );
     }
 }
