@@ -8,13 +8,15 @@ threat model.
 
 ## Requirements
 
-- Linux with user, PID, mount, and network namespaces enabled.
+- Linux with user, PID, mount, cgroup, and network namespaces enabled.
 - Nix with flakes enabled.
 - A `nixpkgs` flake registry entry (the default Nix registry normally provides
   one) so Nix can evaluate package names in `realm.nix`.
 - bubblewrap (`bwrap`). The Nix package and development shell provide it.
-- A systemd user manager for `private` networking and cgroup resource limits.
-  Private mode also needs `pasta` on `PATH`; the Nix package provides it.
+- A systemd user manager for `private` networking and full cgroup resource
+  limits. Without it, `none`/`host` fall back to fail-closed rlimits and
+  `timeout`; `private` refuses to run. Private mode also needs `pasta` on
+  `PATH`; the Nix package provides it.
 
 ## Install and run
 
@@ -80,12 +82,53 @@ in
 `mounts` explicitly exposes host paths inside the sandbox. Only the listed
 paths are visible: `ro` mounts are read-only, `rw` mounts are writable, and
 guest parent directories are created automatically. Host and guest paths must
-be absolute, must not be `/` or contain `..`, and host paths must not contain
-symlinks. Guest targets must not overlap each other and must not replace or
-cover the built-in mount points (`/nix`, `/etc`, `/bin`, `/usr/bin`,
-`/workspace`, `/tmp`, `/proc`, `/dev`, `/home`, `/home/sandbox`, plus closure
-paths); mounting *under* a built-in tree, such as `/home/sandbox/.config`, is
-allowed.
+be absolute and must not be `/`. Paths are normalized (`.`, `..`, repeated
+separators) before validation, and paths that escape `/` are rejected. Host
+paths must not contain symlinks. Guest targets must not overlap each other
+(equal, ancestor, or descendant) and must not replace or cover the built-in
+mount points (`/nix`, `/etc`, `/bin`, `/usr/bin`, `/workspace`, `/tmp`,
+`/proc`, `/dev`, `/home`, `/home/sandbox`, plus closure paths); mounting
+*under* a built-in tree, such as `/home/sandbox/.config`, is allowed. The
+validation is path-tree based, not a special case for `/home`.
+
+The sandbox environment is an explicit allowlist: Realm passes only `HOME`,
+`TMPDIR`, `PWD`, `PATH`, and the `env` entries declared in `realm.nix`.
+Host-only variables such as `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, and
+`XDG_RUNTIME_DIR` are not inherited. `/proc` is a fresh procfs for the private
+PID namespace, and bwrap's own process environment is cleared so
+`/proc/1/environ` does not expose host values.
+
+### Workspace and configuration trust
+
+The workspace is mounted read-write at `/workspace` by default. This is
+intentional: the agent may edit the project. It also means the agent can edit
+`realm.nix` or other build inputs, which are evaluated by Nix on the host
+during the *next* run. Host-side Nix evaluation/build is outside the sandbox
+security boundary; see [SECURITY.md](SECURITY.md).
+
+To separate the two trust inputs, configure the workspace explicitly and keep
+the configuration outside it:
+
+```nix
+{
+  agent = {
+    # packages, env, network, mounts...
+    workspace = {
+      host = "/home/me/projects/app"; # defaults to the current directory
+      mode = "rw";                    # or "ro"
+    };
+    requireCgroup = false;            # true = refuse to run without systemd scope
+  };
+}
+```
+
+`workspace.host` must be an absolute directory and follows the same host-path
+rules as `mounts` (no symlinks).
+
+When the configuration file is inside a writable workspace, Realm pins a
+read-only mount over that file inside the sandbox. This prevents the agent from
+rewriting the configuration itself, but not other files it imports. For full
+protection, use `mode = "ro"` or keep the configuration outside the workspace.
 
 Nix still evaluates package derivations, realizes them, and calculates their
 runtime closure. The sandbox configuration no longer needs to be a flake output.
@@ -97,6 +140,22 @@ services bound to host localhost. `host` shares the host network namespace.
 Private mode runs inside a transient systemd user scope with defaults of 2 GiB
 memory, 100% of one CPU, 512 tasks, and a one-hour wall-clock limit. A usable
 systemd user manager is required for this mode.
+
+Resource limits have an explicit failure policy:
+
+- With a systemd user scope, memory, CPU quota, task count, and wall-clock
+  time are enforced by cgroup v2.
+- Without systemd, `none` and `host` use `setrlimit` for memory, file size,
+  process count, and CPU time, plus the coreutils `timeout` command for the
+  wall-clock limit. If any of these cannot be installed, the sandbox refuses
+  to start (fail-closed). CPU quota is not enforceable by rlimits and is
+  degraded to the CPU-time cap in this mode.
+- `private` always requires systemd and fails closed without it.
+- Set `requireCgroup = true` to refuse all modes when no systemd scope is
+  available.
+
+Seccomp is not enabled in this version. The evaluation and rationale are in
+[SECURITY.md](SECURITY.md#seccomp-evaluation).
 
 Add `cacert` to the sandbox package list for HTTPS clients that need trusted CA
 certificates. Pin or override the `nixpkgs` argument in `realm.nix` if you need a

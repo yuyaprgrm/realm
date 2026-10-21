@@ -14,15 +14,51 @@ pub struct Package {
 }
 
 #[derive(Debug)]
+pub struct WorkspaceCfg {
+    /// Explicit host directory; `None` keeps the current directory default.
+    pub host: Option<PathBuf>,
+    pub read_only: bool,
+}
+
+#[derive(Debug)]
 pub struct SandboxCfg {
     pub packages: Vec<Package>,
     pub env: HashMap<String, String>,
     pub network: Option<String>,
     pub mounts: Vec<BindMount>,
+    pub workspace: Option<WorkspaceCfg>,
+    pub require_cgroup: bool,
 }
 
 // Nix evaluates realm.nix and package derivations outside the sandbox.
-const NORMALIZE: &str = "cfg: { packages = map (p: { out = builtins.toString p; drv = if builtins.isAttrs p && (p.type or \"\") == \"derivation\" then p.drvPath else null; }) cfg.packages; env = cfg.env or {}; network = cfg.network or null; mounts = map (m: { host = builtins.toString m.host; guest = builtins.toString m.guest; mode = builtins.toString m.mode; }) (cfg.mounts or []); }";
+const NORMALIZE: &str = r#"cfg:
+let
+  workspace =
+    if (cfg ? workspace) && cfg.workspace != null then {
+      host =
+        if (cfg.workspace ? host) && cfg.workspace.host != null
+        then builtins.toString cfg.workspace.host
+        else null;
+      mode = builtins.toString (cfg.workspace.mode or "rw");
+    } else null;
+  requireCgroup =
+    if cfg ? requireCgroup then cfg.requireCgroup
+    else if cfg ? require_cgroup then cfg.require_cgroup
+    else false;
+in {
+  packages = map (p: {
+    out = builtins.toString p;
+    drv = if builtins.isAttrs p && (p.type or "") == "derivation" then p.drvPath else null;
+  }) cfg.packages;
+  env = cfg.env or {};
+  network = cfg.network or null;
+  mounts = map (m: {
+    host = builtins.toString m.host;
+    guest = builtins.toString m.guest;
+    mode = builtins.toString m.mode;
+  }) (cfg.mounts or []);
+  inherit workspace requireCgroup;
+}"#;
 
 pub fn eval_sandbox(config: &std::path::Path, name: &str) -> Result<SandboxCfg> {
     if name.is_empty()
@@ -147,11 +183,45 @@ fn parse_sandbox_json(bytes: &[u8]) -> Result<SandboxCfg> {
             });
         }
     }
+    let workspace = match obj.get("workspace") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let w = value
+                .as_object()
+                .ok_or_else(|| Error::Nix("workspace must be an object".into()))?;
+            let host = match w.get("host") {
+                None | Some(Value::Null) => None,
+                Some(host) => Some(PathBuf::from(host.as_str().ok_or_else(|| {
+                    Error::Nix("workspace.host must be string or null".into())
+                })?)),
+            };
+            let mode = w.get("mode").and_then(|x| x.as_str()).unwrap_or("rw");
+            let read_only = match mode {
+                "rw" => false,
+                "ro" => true,
+                other => {
+                    return Err(Error::Nix(format!(
+                        "workspace.mode must be \"ro\" or \"rw\", got \"{other}\""
+                    )));
+                }
+            };
+            Some(WorkspaceCfg { host, read_only })
+        }
+    };
+    let require_cgroup = match obj.get("requireCgroup") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| Error::Nix("requireCgroup must be a boolean".into()))?,
+    };
+
     Ok(SandboxCfg {
         packages: pkgs,
         env,
         network,
         mounts,
+        workspace,
+        require_cgroup,
     })
 }
 
@@ -225,6 +295,34 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("mode")
+        );
+    }
+
+    #[test]
+    fn parses_workspace_and_cgroup_policy() {
+        let json = br#"{"packages":[],"env":{},"workspace":{"host":"/host/ws","mode":"ro"},"requireCgroup":true}"#;
+        let cfg = parse_sandbox_json(json).unwrap();
+        let workspace = cfg.workspace.as_ref().unwrap();
+        assert_eq!(
+            workspace.host.as_deref(),
+            Some(PathBuf::from("/host/ws").as_path())
+        );
+        assert!(workspace.read_only);
+        assert!(cfg.require_cgroup);
+
+        let json = br#"{"packages":[],"env":{},"workspace":{"mode":"rw"},"requireCgroup":false}"#;
+        let cfg = parse_sandbox_json(json).unwrap();
+        let workspace = cfg.workspace.as_ref().unwrap();
+        assert!(workspace.host.is_none());
+        assert!(!workspace.read_only);
+        assert!(!cfg.require_cgroup);
+
+        let json = br#"{"packages":[],"env":{},"workspace":{"mode":"rx"}}"#;
+        assert!(
+            parse_sandbox_json(json)
+                .unwrap_err()
+                .to_string()
+                .contains("workspace.mode")
         );
     }
 }

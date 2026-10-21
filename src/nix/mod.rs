@@ -22,13 +22,47 @@ pub fn build_spec(config: &std::path::Path, sandbox_name: &str) -> Result<Sandbo
     realize::realize_packages(&sandbox_cfg.packages)?;
     let out_paths: Vec<String> = sandbox_cfg.packages.iter().map(|p| p.out.clone()).collect();
     let closure_paths = closure::get_closure(&out_paths)?;
-    build_bwrap_spec(&sandbox_cfg, &closure_paths, std::env::current_dir()?)
+
+    // Workspace and configuration are separate trust decisions. The workspace
+    // defaults to the current directory for compatibility, but can be moved
+    // away from the configuration and/or mounted read-only.
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    if cwd == std::path::Path::new("/") {
+        return Err(crate::error::Error::Spec(
+            "workspace must not be the filesystem root; run realm from a project directory or set workspace.host".into(),
+        ));
+    }
+    let (workspace_host, workspace_read_only) = match &sandbox_cfg.workspace {
+        Some(workspace) => {
+            let host = match &workspace.host {
+                Some(host) => normalized_host_path(host, "workspace")?,
+                None => cwd,
+            };
+            if !host.is_dir() {
+                return Err(crate::error::Error::Spec(format!(
+                    "workspace host path {} is not a directory",
+                    host.display()
+                )));
+            }
+            (host, workspace.read_only)
+        }
+        None => (cwd, false),
+    };
+    build_bwrap_spec(
+        &sandbox_cfg,
+        &closure_paths,
+        workspace_host,
+        workspace_read_only,
+        &config,
+    )
 }
 
 fn build_bwrap_spec(
     cfg: &SandboxCfg,
     closure_paths: &std::collections::HashSet<String>,
-    cwd: std::path::PathBuf,
+    workspace_host: std::path::PathBuf,
+    workspace_read_only: bool,
+    config: &std::path::Path,
 ) -> Result<SandboxSpec> {
     use crate::error::Error;
     use crate::sandbox::etc::GuestFs;
@@ -47,7 +81,10 @@ fn build_bwrap_spec(
             )));
         }
     };
-    let limits = ResourceLimits::default();
+    let limits = ResourceLimits {
+        require_cgroup: cfg.require_cgroup,
+        ..ResourceLimits::default()
+    };
     let uid = 1000;
     let gid = 1000;
 
@@ -85,17 +122,32 @@ fn build_bwrap_spec(
     mounts.push(Mount::Tmpfs {
         target: PathBuf::from("/tmp"),
     });
+    // Fresh procfs for the private PID namespace. Combined with clearing the
+    // bwrap process environment, /proc/<pid>/environ cannot expose host state.
     mounts.push(Mount::Proc {
         target: PathBuf::from("/proc"),
     });
     mounts.push(Mount::Dev {
         target: PathBuf::from("/dev"),
     });
-    // workspace rw
-    mounts.push(Mount::ReadWrite {
-        source: cwd.clone(),
-        target: PathBuf::from("/workspace"),
+    // Workspace is intentionally writable by default, but the mode and host
+    // path are explicit policy. The sandbox configuration file is a separate
+    // trust input; when it lives inside the workspace, pin a read-only view
+    // over it so the agent cannot rewrite the next host-side evaluation.
+    mounts.push(if workspace_read_only {
+        Mount::ReadOnly {
+            source: workspace_host.clone(),
+            target: PathBuf::from("/workspace"),
+        }
+    } else {
+        Mount::ReadWrite {
+            source: workspace_host.clone(),
+            target: PathBuf::from("/workspace"),
+        }
     });
+    if !workspace_read_only {
+        mounts.extend(config_guard_mount(&workspace_host, config));
+    }
 
     // env
     let mut env = Vec::new();
@@ -163,34 +215,42 @@ fn build_bwrap_spec(
     })
 }
 
+/// Normalize a declared guest or host path as a path tree.
+///
+/// Redundant separators and `.` components disappear; `..` is resolved
+/// lexically before any validation. Attempts to escape the filesystem root are
+/// rejected. Guest paths stay purely lexical (they refer to the sandbox tree);
+/// host paths are canonicalized separately below.
 fn normalize_declared_path(path: &std::path::Path, kind: &str) -> Result<std::path::PathBuf> {
     use crate::error::Error;
     use std::path::{Component, Path, PathBuf};
 
     if path.as_os_str().is_empty() {
-        return Err(Error::Spec(format!("mount {kind} path must not be empty")));
+        return Err(Error::Spec(format!("{kind} path must not be empty")));
     }
     if !path.is_absolute() {
         return Err(Error::Spec(format!(
-            "mount {kind} path must be absolute: {}",
+            "{kind} path must be absolute: {}",
             path.display()
         )));
     }
-    let mut normalized = PathBuf::new();
+    let mut normalized = PathBuf::from("/");
     for component in path.components() {
         match component {
-            Component::RootDir => normalized.push("/"),
+            Component::RootDir | Component::CurDir => {}
             Component::Normal(part) => normalized.push(part),
-            Component::CurDir => {}
             Component::ParentDir => {
-                return Err(Error::Spec(format!(
-                    "mount {kind} path must not contain \"..\": {}",
-                    path.display()
-                )));
+                if normalized == Path::new("/") {
+                    return Err(Error::Spec(format!(
+                        "{kind} path escapes the filesystem root: {}",
+                        path.display()
+                    )));
+                }
+                normalized.pop();
             }
             Component::Prefix(_) => {
                 return Err(Error::Spec(format!(
-                    "mount {kind} path is not a Linux path: {}",
+                    "{kind} path is not a Linux path: {}",
                     path.display()
                 )));
             }
@@ -198,30 +258,51 @@ fn normalize_declared_path(path: &std::path::Path, kind: &str) -> Result<std::pa
     }
     if normalized == Path::new("/") {
         return Err(Error::Spec(format!(
-            "mount {kind} path must not be the filesystem root"
+            "{kind} path must not be the filesystem root"
         )));
     }
     Ok(normalized)
 }
 
-fn normalized_host_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+fn normalized_host_path(path: &std::path::Path, kind: &str) -> Result<std::path::PathBuf> {
     use crate::error::Error;
 
-    let declared = normalize_declared_path(path, "host")?;
-    let canonical = std::fs::canonicalize(&declared).map_err(|error| {
+    let declared = normalize_declared_path(path, kind)?;
+    // Resolve the original path with normal OS semantics and compare it with
+    // the lexical tree. This rejects symlinks even when a `..` component would
+    // otherwise remove the symlink from the normalized path.
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
         Error::Spec(format!(
-            "mount host path {} is not accessible: {error}",
+            "{kind} host path {} is not accessible: {error}",
             declared.display()
         ))
     })?;
     if canonical != declared {
         return Err(Error::Spec(format!(
-            "mount host path {} resolves to {}; symlinks are not allowed",
+            "{kind} host path {} resolves to {}; symlinks and non-lexical `..` traversal are not allowed",
             declared.display(),
             canonical.display()
         )));
     }
     Ok(canonical)
+}
+
+/// Pin a read-only mount over the configuration file when it is part of the
+/// writable workspace. The agent can still modify other files (and anything
+/// the configuration imports); this is a targeted guard, not a sandbox for an
+/// untrusted configuration.
+fn config_guard_mount(workspace_host: &std::path::Path, config: &std::path::Path) -> Option<Mount> {
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    let relative = config.strip_prefix(workspace_host).ok()?;
+    if relative.as_os_str().is_empty() || relative == Path::new(".") {
+        return None;
+    }
+    Some(Mount::ReadOnly {
+        source: config.to_path_buf(),
+        target: PathBuf::from("/workspace").join(relative),
+    })
 }
 
 fn paths_overlap(a: &std::path::Path, b: &std::path::Path) -> bool {
@@ -242,12 +323,21 @@ fn user_mounts(bindings: &[BindMount], reserved: &[std::path::PathBuf]) -> Resul
 
     let mut normalized = Vec::with_capacity(bindings.len());
     for binding in bindings {
-        let host = normalized_host_path(&binding.host)?;
-        let guest = normalize_declared_path(&binding.guest, "guest")?;
+        // Host and guest paths have separate responsibilities: the host side
+        // is resolved against the real filesystem (no symlinks), while the
+        // guest side is a purely lexical path in the sandbox mount tree.
+        let host = normalized_host_path(&binding.host, "mount")?;
+        let guest = normalize_declared_path(&binding.guest, "mount guest")?;
         for boundary in reserved {
-            if guest == *boundary || boundary.starts_with(&guest) {
+            if guest == *boundary {
                 return Err(Error::Spec(format!(
-                    "mount guest path {} conflicts with reserved sandbox path {}",
+                    "mount guest path {} is already a reserved sandbox mount point",
+                    guest.display()
+                )));
+            }
+            if boundary.starts_with(&guest) {
+                return Err(Error::Spec(format!(
+                    "mount guest path {} would cover reserved sandbox path {}; mount below the reserved path instead",
                     guest.display(),
                     boundary.display()
                 )));
@@ -260,7 +350,7 @@ fn user_mounts(bindings: &[BindMount], reserved: &[std::path::PathBuf]) -> Resul
         for (_, other, _) in normalized.iter().skip(i + 1) {
             if paths_overlap(guest, other) {
                 return Err(Error::Spec(format!(
-                    "mount guest paths {} and {} overlap",
+                    "mount guest paths {} and {} overlap (one is equal to, an ancestor of, or a descendant of the other)",
                     guest.display(),
                     other.display()
                 )));
@@ -472,5 +562,90 @@ mod mount_tests {
         let error =
             user_mounts(&[bind(&link, "/sandbox/data", true)], &reserved_targets()).unwrap_err();
         assert!(error.to_string().contains("symlink"), "{error}");
+
+        // A `..` must not hide a preceding symlink from validation.
+        let nested = root.path().join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(root.path().join("a/x")).unwrap();
+        let link = root.path().join("link2");
+        std::os::unix::fs::symlink(&nested, &link).unwrap();
+        let error = user_mounts(
+            &[bind(&root.path().join("link2/../x"), "/sandbox/data", true)],
+            &reserved_targets(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("symlink"), "{error}");
+    }
+
+    #[test]
+    fn normalizes_guest_paths_before_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let mounts = user_mounts(
+            &[bind(root.path(), "/sandbox/./a//b/../c", true)],
+            &reserved_targets(),
+        )
+        .unwrap();
+        let targets = mounts.iter().map(Mount::target).collect::<Vec<_>>();
+        assert!(targets.contains(&std::path::Path::new("/sandbox/a/c")));
+        assert!(!targets.contains(&std::path::Path::new("/sandbox/b")));
+
+        // Normalization happens before overlap detection.
+        let error = user_mounts(
+            &[
+                bind(root.path(), "/sandbox/a/./x", true),
+                bind(root.path(), "/sandbox/a/x//y/..", false),
+            ],
+            &reserved_targets(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("overlap"), "{error}");
+    }
+
+    #[test]
+    fn normalized_paths_cannot_escape_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        for guest in ["/../etc", "/sandbox/../../etc"] {
+            let error =
+                user_mounts(&[bind(root.path(), guest, true)], &reserved_targets()).unwrap_err();
+            assert!(error.to_string().contains("escapes"), "{error}");
+        }
+    }
+
+    #[test]
+    fn rejection_messages_explain_the_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let error = user_mounts(&[bind(root.path(), "/home", true)], &reserved_targets())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/home"), "{error}");
+        assert!(error.contains("reserved"), "{error}");
+
+        let error = user_mounts(
+            &[bind(root.path(), "/sandbox", true)],
+            &[PathBuf::from("/sandbox/child")],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("/sandbox/child"), "{error}");
+        assert!(error.contains("cover"), "{error}");
+    }
+
+    #[test]
+    fn configuration_inside_a_writable_workspace_is_pinned_read_only() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let config = workspace.join("nix/realm.nix");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "").unwrap();
+
+        let guard = config_guard_mount(&workspace, &config).unwrap();
+        assert!(matches!(
+            guard,
+            Mount::ReadOnly { ref source, ref target }
+                if source == &config
+                    && target == std::path::Path::new("/workspace/nix/realm.nix")
+        ));
+
+        assert!(config_guard_mount(&workspace, &root.path().join("other.nix")).is_none());
     }
 }

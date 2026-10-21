@@ -1,14 +1,26 @@
 use crate::error::{Error, Result};
 use crate::sandbox::spec::{Mount, SandboxSpec};
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::Command;
 
 /// Build the bwrap command (without executing it). Shared by the plain path
 /// and the cgroup-wrapped path.
 pub fn build_command(spec: &SandboxSpec) -> Result<Command> {
     let bwrap = which::which("bwrap").map_err(|e| Error::Bwrap(e.to_string()))?;
+    build_command_with(&bwrap, spec)
+}
 
-    let mut cmd = Command::new(&bwrap);
+/// Build the bwrap command using an explicit binary path. Keeps command
+/// construction testable without requiring bwrap to be installed.
+fn build_command_with(bwrap: &Path, spec: &SandboxSpec) -> Result<Command> {
+    let mut cmd = Command::new(bwrap);
+    // bwrap remains PID 1 inside the new PID namespace and therefore keeps its
+    // own environment, which is readable through /proc/1/environ. Clear it
+    // here so host-only variables (SSH_AUTH_SOCK, DBUS_SESSION_BUS_ADDRESS,
+    // XDG_RUNTIME_DIR, ...) never become visible in the sandbox. The child's
+    // environment is built explicitly with --clearenv/--setenv below.
+    cmd.env_clear();
     // Isolation: new user/pid/uts/ipc namespaces and private cgroup ns.
     cmd.arg("--unshare-user")
         .arg("--unshare-pid")
@@ -19,12 +31,17 @@ pub fn build_command(spec: &SandboxSpec) -> Result<Command> {
     if spec.network == crate::sandbox::spec::NetworkMode::None {
         cmd.arg("--unshare-net");
     }
-    cmd.arg("--unshare-cgroup-try")
+    // Fail closed rather than silently exposing the host cgroup hierarchy when
+    // cgroup namespaces are unavailable.
+    cmd.arg("--unshare-cgroup")
         .arg("--die-with-parent")
         // Fresh terminal session: blocks TIOCSTI / controlling-tty injection.
         .arg("--new-session")
         // No nested user namespaces: this bwrap invocation creates its own.
         .arg("--disable-userns");
+    // No seccomp preset is installed. The primary boundary is namespaces +
+    // capability drop + filesystem/network isolation; a broad syscall
+    // allowlist would break Nix runtimes. See SECURITY.md for the evaluation.
 
     // Network policy: None gets an empty namespace; Private inherits the
     // namespace created and connected by pasta; Host inherits the host netns.
@@ -79,37 +96,57 @@ pub fn build_command(spec: &SandboxSpec) -> Result<Command> {
 }
 
 /// Apply fallback rlimits in the child before exec. Used when no cgroup
-/// wrapper is available; memory address-space and CPU are the meaningful caps.
-pub fn apply_rlimits(cmd: &mut Command, spec: &SandboxSpec) {
+/// wrapper is available. Memory, file size, process count, and CPU-time are
+/// mandatory in this mode: if a limit cannot be installed, exec fails instead
+/// of running with silently weaker limits (fail-closed).
+pub fn apply_rlimits(cmd: &mut Command, spec: &SandboxSpec) -> Result<()> {
     let mem = spec.limits.memory_bytes;
     let cpu = spec.limits.timeout_secs.unwrap_or(0);
     let nproc = spec.limits.max_pids as u64;
     let fsize = spec.limits.tmpfs_bytes;
 
     unsafe {
-        let _ = cmd.pre_exec(move || {
-            set_limit(libc::RLIMIT_AS, mem);
-            set_limit(libc::RLIMIT_FSIZE, fsize);
-            if nproc > 0 {
-                set_limit(libc::RLIMIT_NPROC, nproc);
-            }
-            if cpu > 0 {
-                set_limit(libc::RLIMIT_CPU, cpu);
-            }
+        cmd.pre_exec(move || {
+            set_limit(libc::RLIMIT_AS, mem)?;
+            set_limit(libc::RLIMIT_FSIZE, fsize)?;
+            set_limit(libc::RLIMIT_NPROC, nproc)?;
+            set_limit(libc::RLIMIT_CPU, cpu)?;
             Ok(())
         });
     }
+    Ok(())
 }
 
-fn set_limit(resource: libc::c_uint, value: u64) {
-    let lim = libc::rlimit {
-        rlim_cur: value as libc::rlim_t,
-        rlim_max: value as libc::rlim_t,
-    };
-    // Best effort: some limits are not permitted in a user namespace.
-    unsafe {
-        libc::setrlimit(resource, &lim);
+/// Install a hard upper bound for `resource`.
+///
+/// `0` means "not configured" and is ignored. If the inherited hard limit is
+/// lower than the requested value the lower limit is kept; the maximum is
+/// never raised, so the sandbox cannot undo the cap later.
+fn set_limit(resource: libc::c_uint, value: u64) -> std::io::Result<()> {
+    if value == 0 {
+        return Ok(());
     }
+    let mut current = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(resource, &mut current) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let requested = value as libc::rlim_t;
+    let max = match current.rlim_max {
+        libc::RLIM_INFINITY => requested,
+        hard if hard < requested => hard,
+        _ => requested,
+    };
+    let lim = libc::rlimit {
+        rlim_cur: max,
+        rlim_max: max,
+    };
+    if unsafe { libc::setrlimit(resource, &lim) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -144,7 +181,7 @@ mod tests {
     }
 
     fn args_with(s: &SandboxSpec) -> Vec<String> {
-        build_command(s)
+        build_command_with(Path::new("/usr/bin/bwrap"), s)
             .unwrap()
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -162,7 +199,7 @@ mod tests {
             "--unshare-uts",
             "--unshare-ipc",
             "--unshare-net",
-            "--unshare-cgroup-try",
+            "--unshare-cgroup",
             "--die-with-parent",
             "--new-session",
             "--disable-userns",
@@ -173,6 +210,12 @@ mod tests {
         assert!(a.contains(&"--dev".to_string()));
         // tmpfs size comes from limits
         assert!(a.contains(&"536870912".to_string()));
+    }
+
+    #[test]
+    fn bwrap_process_environment_is_cleared() {
+        let cmd = build_command_with(Path::new("/usr/bin/bwrap"), &spec()).unwrap();
+        assert_eq!(cmd.get_envs().count(), 0);
     }
 
     #[test]

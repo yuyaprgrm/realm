@@ -62,6 +62,9 @@ pub struct ResourceLimits {
     pub timeout_secs: Option<u64>,
     /// Max size in bytes of the writable `/tmp` tmpfs.
     pub tmpfs_bytes: u64,
+    /// Refuse to run when no systemd user scope is available, instead of
+    /// falling back to the weaker rlimit policy.
+    pub require_cgroup: bool,
 }
 
 impl Default for ResourceLimits {
@@ -72,6 +75,7 @@ impl Default for ResourceLimits {
             max_pids: 512,
             timeout_secs: Some(60 * 60),    // one hour
             tmpfs_bytes: 512 * 1024 * 1024, // 512 MiB
+            require_cgroup: false,
         }
     }
 }
@@ -104,6 +108,7 @@ mod tests {
         assert_eq!(l.max_pids, 512);
         assert_eq!(l.tmpfs_bytes, 512 * 1024 * 1024);
         assert_eq!(l.timeout_secs, Some(60 * 60));
+        assert!(!l.require_cgroup);
     }
 
     #[test]

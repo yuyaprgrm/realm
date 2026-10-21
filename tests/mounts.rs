@@ -77,6 +77,23 @@ in
             .output()
             .expect("start sandbox binary")
     }
+
+    /// Run with the fixture directory as both workspace and config location.
+    fn run_from_workspace(&self, script: &str) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_realm"))
+            .args([
+                "mounts-test",
+                "--",
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-c",
+                script,
+            ])
+            .current_dir(self.root.path())
+            .output()
+            .expect("start sandbox binary")
+    }
 }
 
 fn nix_string(path: &Path) -> String {
@@ -179,4 +196,33 @@ fn mount_replacing_reserved_home_path_is_rejected() {
     assert!(!output.status.success(), "expected reserved path rejection");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("reserved"), "{stderr}");
+}
+
+#[test]
+fn workspace_is_rw_but_the_configuration_file_is_pinned_read_only() {
+    let fixture = Fixture::new();
+    let output = fixture.run_from_workspace(
+        r#"
+set -eu
+printf 'scratch\n' > /workspace/scratch.txt
+if printf 'pwned\n' >> /workspace/realm.nix 2>/dev/null; then
+  echo config:writable
+else
+  echo config:readonly
+fi
+echo guard:done
+"#,
+    );
+    let stdout = assert_success(&output);
+    assert!(stdout.contains("config:readonly"), "{stdout}");
+    assert!(stdout.contains("guard:done"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.path().join("scratch.txt")).unwrap(),
+        "scratch\n"
+    );
+    assert!(
+        !std::fs::read_to_string(fixture.root.path().join("realm.nix"))
+            .unwrap()
+            .contains("pwned")
+    );
 }
