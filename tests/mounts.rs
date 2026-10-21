@@ -8,16 +8,23 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_mounts(&[("ro", "/sandbox/ro", "ro"), ("rw", "/sandbox/rw", "rw")])
+    }
+
+    /// Fixture whose sandbox mounts each `(host dir, guest path, mode)` tuple.
+    fn with_mounts(mounts: &[(&str, &str, &str)]) -> Self {
         let root = tempfile::tempdir().expect("create mount fixture");
-        for dir in ["ro", "rw", "outside"] {
-            std::fs::create_dir(root.path().join(dir)).expect("create fixture directory");
-        }
-        std::fs::write(root.path().join("ro/read.txt"), "ro-host\n").unwrap();
-        std::fs::write(root.path().join("rw/read.txt"), "rw-host\n").unwrap();
+        std::fs::create_dir(root.path().join("outside")).expect("create fixture directory");
         std::fs::write(root.path().join("outside/secret.txt"), "host-secret\n").unwrap();
 
-        let mounts = [("ro", "/sandbox/ro", "ro"), ("rw", "/sandbox/rw", "rw")]
-            .into_iter()
+        for (dir, _, _) in mounts {
+            let host = root.path().join(dir);
+            std::fs::create_dir(&host).expect("create fixture directory");
+            std::fs::write(host.join("read.txt"), format!("{dir}-host\n")).unwrap();
+        }
+
+        let mounts = mounts
+            .iter()
             .map(|(dir, guest, mode)| {
                 format!(
                     "{{ host = {}; guest = {}; mode = {}; }}",
@@ -143,4 +150,33 @@ echo rw:done
         std::fs::read_to_string(fixture.root.path().join("outside/secret.txt")).unwrap(),
         "host-secret\n"
     );
+}
+
+#[test]
+fn mount_under_reserved_home_path_is_allowed() {
+    let fixture = Fixture::with_mounts(&[("cfg", "/home/sandbox/.config/probe", "rw")]);
+    let output = fixture.run(
+        r#"
+set -eu
+test -d /home/sandbox/.config/probe
+test "$(cat /home/sandbox/.config/probe/read.txt)" = "cfg-host"
+printf 'nested\n' > /home/sandbox/.config/probe/created.txt
+echo nested:done
+"#,
+    );
+    let stdout = assert_success(&output);
+    assert!(stdout.contains("nested:done"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.path().join("cfg/created.txt")).unwrap(),
+        "nested\n"
+    );
+}
+
+#[test]
+fn mount_replacing_reserved_home_path_is_rejected() {
+    let fixture = Fixture::with_mounts(&[("cfg", "/home", "rw")]);
+    let output = fixture.run("true");
+    assert!(!output.status.success(), "expected reserved path rejection");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("reserved"), "{stderr}");
 }

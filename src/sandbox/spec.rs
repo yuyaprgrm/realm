@@ -10,6 +10,20 @@ pub enum Mount {
     Dir { target: PathBuf },
 }
 
+impl Mount {
+    /// Guest path where this mount is attached.
+    pub fn target(&self) -> &std::path::Path {
+        match self {
+            Mount::ReadOnly { target, .. }
+            | Mount::ReadWrite { target, .. }
+            | Mount::Tmpfs { target }
+            | Mount::Proc { target }
+            | Mount::Dev { target }
+            | Mount::Dir { target } => target,
+        }
+    }
+}
+
 /// Explicit host path bind mounted into the sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindMount {

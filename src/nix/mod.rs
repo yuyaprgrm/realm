@@ -143,7 +143,10 @@ fn build_bwrap_spec(
     mounts.push(Mount::Tmpfs {
         target: PathBuf::from("/home/sandbox"),
     });
-    mounts.extend(user_mounts(&cfg.mounts)?);
+    // Built-in mount targets act as mount boundaries: user mounts may nest
+    // under them but must not replace or cover them.
+    let reserved: Vec<PathBuf> = mounts.iter().map(Mount::target).collect();
+    mounts.extend(user_mounts(&cfg.mounts, &reserved)?);
 
     Ok(SandboxSpec {
         mounts,
@@ -159,19 +162,6 @@ fn build_bwrap_spec(
         keep_alive: vec![guest],
     })
 }
-
-// User mounts must not replace or nest under the built-in isolation trees.
-const RESERVED_GUEST_PATHS: &[&str] = &[
-    "/nix",
-    "/etc",
-    "/bin",
-    "/usr",
-    "/workspace",
-    "/tmp",
-    "/proc",
-    "/dev",
-    "/home",
-];
 
 fn normalize_declared_path(path: &std::path::Path, kind: &str) -> Result<std::path::PathBuf> {
     use crate::error::Error;
@@ -238,7 +228,14 @@ fn paths_overlap(a: &std::path::Path, b: &std::path::Path) -> bool {
     a == b || a.starts_with(b) || b.starts_with(a)
 }
 
-fn user_mounts(bindings: &[BindMount]) -> Result<Vec<Mount>> {
+/// Build the mount list for user-declared bind mounts.
+///
+/// `reserved` holds the guest targets of the built-in sandbox mounts. A user
+/// mount may sit under such a boundary (e.g. `/home/sandbox/.config/foo` when
+/// `/home` and `/home/sandbox` are reserved) but must not replace the boundary
+/// itself nor cover it with an ancestor path. Overlapping user mounts among
+/// themselves stay rejected so parent/child mount intent is never ambiguous.
+fn user_mounts(bindings: &[BindMount], reserved: &[std::path::PathBuf]) -> Result<Vec<Mount>> {
     use crate::error::Error;
     use std::collections::HashSet;
     use std::path::Path;
@@ -247,13 +244,12 @@ fn user_mounts(bindings: &[BindMount]) -> Result<Vec<Mount>> {
     for binding in bindings {
         let host = normalized_host_path(&binding.host)?;
         let guest = normalize_declared_path(&binding.guest, "guest")?;
-        for reserved in RESERVED_GUEST_PATHS {
-            let reserved = Path::new(reserved);
-            if paths_overlap(&guest, reserved) {
+        for boundary in reserved {
+            if guest == *boundary || boundary.starts_with(&guest) {
                 return Err(Error::Spec(format!(
-                    "mount guest path {} overlaps reserved sandbox path {}",
+                    "mount guest path {} conflicts with reserved sandbox path {}",
                     guest.display(),
-                    reserved.display()
+                    boundary.display()
                 )));
             }
         }
@@ -315,6 +311,27 @@ mod mount_tests {
         }
     }
 
+    /// Built-in mount targets as produced by `build_bwrap_spec` (closure
+    /// paths excluded; they only add deeper `/nix/store/...` boundaries).
+    fn reserved_targets() -> Vec<PathBuf> {
+        [
+            "/nix",
+            "/nix/store",
+            "/etc",
+            "/bin",
+            "/usr/bin",
+            "/workspace",
+            "/tmp",
+            "/proc",
+            "/dev",
+            "/home",
+            "/home/sandbox",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect()
+    }
+
     #[test]
     fn creates_guest_parents_and_preserves_modes() {
         let root = tempfile::tempdir().unwrap();
@@ -323,10 +340,13 @@ mod mount_tests {
         std::fs::create_dir(&ro).unwrap();
         std::fs::create_dir(&rw).unwrap();
 
-        let mounts = user_mounts(&[
-            bind(&ro, "/sandbox/ro", true),
-            bind(&rw, "/sandbox/rw", false),
-        ])
+        let mounts = user_mounts(
+            &[
+                bind(&ro, "/sandbox/ro", true),
+                bind(&rw, "/sandbox/rw", false),
+            ],
+            &reserved_targets(),
+        )
         .unwrap();
         let args = mounts.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>();
         assert_eq!(args.len(), 3, "{args:?}");
@@ -342,17 +362,81 @@ mod mount_tests {
     }
 
     #[test]
+    fn allows_mounts_under_reserved_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = root.path().join("cfg");
+        let data = root.path().join("data");
+        std::fs::create_dir(&cfg).unwrap();
+        std::fs::create_dir(&data).unwrap();
+
+        let mounts = user_mounts(
+            &[
+                bind(&cfg, "/home/sandbox/.config/probe", false),
+                bind(&data, "/workspace/data", true),
+            ],
+            &reserved_targets(),
+        )
+        .unwrap();
+        let targets = mounts.iter().map(Mount::target).collect::<Vec<_>>();
+        for expected in [
+            "/home",
+            "/home/sandbox",
+            "/home/sandbox/.config",
+            "/home/sandbox/.config/probe",
+            "/workspace",
+            "/workspace/data",
+        ] {
+            assert!(
+                targets.contains(&std::path::Path::new(expected)),
+                "missing {expected} in {targets:?}"
+            );
+        }
+        assert!(matches!(
+            mounts.iter().find(|m| m.target() == std::path::Path::new("/home/sandbox/.config/probe")),
+            Some(Mount::ReadWrite { source, target })
+                if source == &cfg && target == std::path::Path::new("/home/sandbox/.config/probe")
+        ));
+        assert!(matches!(
+            mounts.iter().find(|m| m.target() == std::path::Path::new("/workspace/data")),
+            Some(Mount::ReadOnly { source, target })
+                if source == &data && target == std::path::Path::new("/workspace/data")
+        ));
+    }
+
+    #[test]
+    fn rejects_mounts_replacing_reserved_paths() {
+        let root = tempfile::tempdir().unwrap();
+        for guest in [
+            "/home",
+            "/home/sandbox",
+            "/tmp",
+            "/workspace",
+            "/etc",
+            "/nix/store",
+            "/usr",
+        ] {
+            let error =
+                user_mounts(&[bind(root.path(), guest, true)], &reserved_targets()).unwrap_err();
+            assert!(error.to_string().contains("reserved"), "{error}");
+        }
+    }
+
+    #[test]
     fn rejects_relative_and_traversal_paths() {
         let root = tempfile::tempdir().unwrap();
-        for guest in ["relative", "/sandbox/../etc", "/", "/workspace/data"] {
-            let error = user_mounts(&[bind(root.path(), guest, true)]).unwrap_err();
+        for guest in ["relative", "/sandbox/../etc", "/"] {
+            let error =
+                user_mounts(&[bind(root.path(), guest, true)], &reserved_targets()).unwrap_err();
             assert!(error.to_string().contains("mount"), "{error}");
         }
-        let error = user_mounts(&[BindMount {
-            host: PathBuf::from("relative"),
-            guest: PathBuf::from("/sandbox/data"),
-            read_only: true,
-        }])
+        let error = user_mounts(
+            &[BindMount {
+                host: PathBuf::from("relative"),
+                guest: PathBuf::from("/sandbox/data"),
+                read_only: true,
+            }],
+            &reserved_targets(),
+        )
         .unwrap_err();
         assert!(error.to_string().contains("mount"), "{error}");
     }
@@ -365,10 +449,13 @@ mod mount_tests {
             ("/sandbox", "/sandbox/a"),
             ("/sandbox/a", "/sandbox/a/b"),
         ] {
-            let error = user_mounts(&[
-                bind(root.path(), guests.0, true),
-                bind(root.path(), guests.1, false),
-            ])
+            let error = user_mounts(
+                &[
+                    bind(root.path(), guests.0, true),
+                    bind(root.path(), guests.1, false),
+                ],
+                &reserved_targets(),
+            )
             .unwrap_err();
             assert!(error.to_string().contains("overlap"), "{error}");
         }
@@ -382,7 +469,8 @@ mod mount_tests {
         std::fs::create_dir(&real).unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        let error = user_mounts(&[bind(&link, "/sandbox/data", true)]).unwrap_err();
+        let error =
+            user_mounts(&[bind(&link, "/sandbox/data", true)], &reserved_targets()).unwrap_err();
         assert!(error.to_string().contains("symlink"), "{error}");
     }
 }
