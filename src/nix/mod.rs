@@ -145,7 +145,7 @@ fn build_bwrap_spec(
     });
     // Built-in mount targets act as mount boundaries: user mounts may nest
     // under them but must not replace or cover them.
-    let reserved: Vec<PathBuf> = mounts.iter().map(Mount::target).collect();
+    let reserved: Vec<PathBuf> = mounts.iter().map(|m| m.target().to_path_buf()).collect();
     mounts.extend(user_mounts(&cfg.mounts, &reserved)?);
 
     Ok(SandboxSpec {
