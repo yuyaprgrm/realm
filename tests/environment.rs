@@ -22,6 +22,7 @@ in
     packages = with pkgs; [ bash coreutils gnugrep ];
     env = { REALM_EXPLICIT = "visible"; };
     network = "none";
+    resources = { enable = true; backend = "rlimit"; };
   };
 }
 "#,

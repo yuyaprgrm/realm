@@ -3,6 +3,7 @@ mod common;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::MetadataExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
@@ -11,6 +12,56 @@ use std::time::Duration;
 const PRIVATE_ATTR: &str = "private-test";
 const NONE_ATTR: &str = "none-test";
 const HOST_ATTR: &str = "host-test";
+
+/// Sandboxes with an explicit resource backend.
+///
+/// The `none` and `host` sandboxes use the rlimit backend so that they run
+/// on hosts without a systemd user manager. The `private` sandbox uses the
+/// cgroup backend: pasta and the sandbox share the systemd scope that
+/// carries the limits.
+struct Fixture {
+    _root: tempfile::TempDir,
+    config: PathBuf,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let root = tempfile::tempdir().expect("create network fixture");
+        let config = root.path().join("realm.nix");
+        std::fs::write(
+            &config,
+            r#"{ nixpkgs ? builtins.getFlake "nixpkgs", system ? builtins.currentSystem }:
+let pkgs = import nixpkgs.sourceInfo.outPath { inherit system; };
+in
+{
+  none-test = {
+    packages = with pkgs; [ bash coreutils curl procps cacert ];
+    env = { };
+    network = "none";
+    resources = { enable = true; backend = "rlimit"; };
+  };
+  private-test = {
+    packages = with pkgs; [ bash coreutils curl procps cacert ];
+    env = { };
+    network = "private";
+    resources = { enable = true; backend = "cgroup"; };
+  };
+  host-test = {
+    packages = with pkgs; [ bash coreutils curl procps cacert ];
+    env = { };
+    network = "host";
+    resources = { enable = true; backend = "rlimit"; };
+  };
+}
+"#,
+        )
+        .unwrap();
+        Self {
+            _root: root,
+            config,
+        }
+    }
+}
 
 struct HostLocalServer {
     port: u16,
@@ -68,9 +119,19 @@ impl Drop for HostLocalServer {
     }
 }
 
-fn run_sandbox(attr: &str, script: &str) -> std::process::Output {
+fn run_sandbox(fixture: &Fixture, attr: &str, script: &str) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_realm"))
-        .args([attr, "--", "bash", "--noprofile", "--norc", "-c", script])
+        .args([
+            "--config",
+            fixture.config.to_str().unwrap(),
+            attr,
+            "--",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            script,
+        ])
         .output()
         .expect("start sandbox binary")
 }
@@ -156,7 +217,8 @@ if curl --silent --show-error --connect-timeout 2 http://127.0.0.1:{port}/ >/dev
         isolation = isolation_check(),
         port = server.port,
     );
-    let output = run_sandbox(NONE_ATTR, &script);
+    let fixture = Fixture::new();
+    let output = run_sandbox(&fixture, NONE_ATTR, &script);
     assert_process_isolated(&output);
     let text = output_text(&output);
     for expected in [
@@ -197,7 +259,8 @@ if curl --silent --show-error --connect-timeout 2 http://127.0.0.1:{port}/ >/dev
         host_netns = namespace_inode("net"),
         port = server.port,
     );
-    let output = run_sandbox(PRIVATE_ATTR, &script);
+    let fixture = Fixture::new();
+    let output = run_sandbox(&fixture, PRIVATE_ATTR, &script);
     assert_process_isolated(&output);
     let text = output_text(&output);
     for expected in [
@@ -235,7 +298,8 @@ if curl --silent --show-error --connect-timeout 3 http://127.0.0.1:{port}/ >/dev
         host_netns = namespace_inode("net"),
         port = server.port,
     );
-    let output = run_sandbox(HOST_ATTR, &script);
+    let fixture = Fixture::new();
+    let output = run_sandbox(&fixture, HOST_ATTR, &script);
     assert_process_isolated(&output);
     let text = output_text(&output);
     for expected in ["netns:host", "host-localhost:reachable"] {
@@ -253,8 +317,11 @@ fn private_is_launched_with_resource_limits() {
         return;
     }
     let script = "sleep 10";
+    let fixture = Fixture::new();
     let mut child = Command::new(env!("CARGO_BIN_EXE_realm"))
         .args([
+            "--config",
+            fixture.config.to_str().unwrap(),
             PRIVATE_ATTR,
             "--",
             "bash",

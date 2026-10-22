@@ -100,9 +100,11 @@ workspace.
   entries reach the agent. The bwrap process environment is cleared, so
   `/proc/1/environ` is not a channel for inherited host variables. `/proc` is
   a fresh procfs for the sandbox PID namespace.
-- **Resources:** cgroup v2 limits via a transient systemd user scope, with a
-  fail-closed rlimit/timeout fallback when systemd is unavailable (see below).
-  `/tmp` and `/home/sandbox` tmpfs are size-limited.
+- **Resources:** cgroup v2 limits via a transient systemd user scope, or
+  `setrlimit`/`timeout` limits, selected explicitly by `resources.backend`.
+  The selected backend is the only one used; there is no fallback to a weaker
+  mechanism (see below). `/tmp` and `/home/sandbox` tmpfs are size-limited
+  while the limits are enabled.
 - **Network:** `None` has no network namespace access, `Private` uses a
   pasta-backed private namespace, and `Host` shares the host network namespace.
   DNS/CA material is only prepared when network access is allowed.
@@ -152,24 +154,35 @@ Host environment variables are not inherited by the sandbox:
 
 ## Resource limits and failure policy
 
-| Control | systemd user scope | No systemd | Failure policy |
+The `resources` block in `realm.nix` selects the mechanism that enforces the
+limits. Only the selected backend is used; there is no fallback to a weaker
+mechanism, and a backend that cannot be applied fails the launch.
+
+| Control | `cgroup` backend | `rlimit` backend | Failure policy |
 | --- | --- | --- | --- |
 | Memory | `MemoryMax` (cgroup v2) | `RLIMIT_AS` (address space, not resident memory) | fail-closed if `setrlimit` fails |
 | Task/process count | `TasksMax` (per cgroup) | `RLIMIT_NPROC` (per user ID, host-wide) | fail-closed if `setrlimit` fails |
 | Wall-clock timeout | `RuntimeMaxSec` | coreutils `timeout` wrapper | fail-closed if `timeout` is missing |
 | CPU quota | `CPUQuota` | not enforceable; only `RLIMIT_CPU` seconds | degraded, documented as resource control |
-| `/tmp`, `/home/sandbox` size | bwrap `--size` tmpfs | bwrap `--size` tmpfs | enforced by bwrap in all modes |
-| Private network | systemd scope required | refused | fail-closed |
-| All cgroup limits | required when `requireCgroup = true` | refused | fail-closed |
+| `/tmp`, `/home/sandbox` size | bwrap `--size` tmpfs | bwrap `--size` tmpfs | enforced by bwrap when the limits are enabled |
+| Private network | shares the systemd scope | shares the rlimit process tree | fail-closed when the backend is unavailable |
+| All cgroup limits | required by `resources.backend = "cgroup"` | never applied | fail-closed |
+
+The default is `enable = true` with `backend = "cgroup"`: a host without a
+usable systemd user manager refuses to start the sandbox instead of running
+it with weaker limits. `resources.backend = "rlimit"` selects the rlimit
+backend explicitly, and `resources.enable = false` applies no limit at all.
+The removed `requireCgroup` option is ignored with a deprecation warning.
 
 Address-space and process-count limits are treated as DoS containment and are
-fail-closed in the fallback. `RLIMIT_AS` caps address space, not resident
-memory. `RLIMIT_NPROC` applies per user ID to the whole host, not per sandbox;
-a true per-sandbox process cap requires cgroups (the systemd path). CPU quota
-is a resource-control feature rather than a host-isolation boundary; without
-systemd the `RLIMIT_CPU` cap applies but the percentage quota is not emulated.
-`private` networking is fail-closed because pasta and the sandbox must share
-the resource scope.
+fail-closed in the rlimit backend. `RLIMIT_AS` caps address space, not
+resident memory. `RLIMIT_NPROC` applies per user ID to the whole host, not
+per sandbox; a true per-sandbox process cap requires cgroups (the `cgroup`
+backend). CPU quota is a resource-control feature rather than a host-isolation
+boundary; in the rlimit backend the `RLIMIT_CPU` cap applies but the
+percentage quota is not emulated. `private` networking is fail-closed when
+the selected backend cannot carry pasta and the sandbox, because both must
+share the same limit scope.
 
 ## Seccomp evaluation
 
@@ -216,10 +229,11 @@ namespaces and the absence of capabilities rather than a syscall filter.
   paths as a tree; `nix::config_guard_mount` pins the config's directory and
   file read-only when they are inside a writable workspace.
 - **Runtime boundary:** `sandbox::run` is the only entry point that launches the
-  contained agent; `sandbox::cgroup::exec_with_limits`/bwrap enforce containment
-  and the resource failure policy.
+  contained agent; `sandbox::limits::exec`/bwrap enforce containment and the
+  resource failure policy.
 - **Environment boundary:** `sandbox::bwrap::build_command` clears the bwrap
-  process environment; wrapper paths use `sandbox::cgroup::clean_bwrap_command`.
+  process environment; the systemd and pasta wrapper paths sanitize it with
+  `env -i` and an empty environment.
 
 # Platform Support
 

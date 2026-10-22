@@ -13,10 +13,11 @@ threat model.
 - A `nixpkgs` flake registry entry (the default Nix registry normally provides
   one) so Nix can evaluate package names in `realm.nix`.
 - bubblewrap (`bwrap`). The Nix package and development shell provide it.
-- A systemd user manager for `private` networking and full cgroup resource
-  limits. Without it, `none`/`host` fall back to fail-closed rlimits and
-  `timeout`; `private` refuses to run. Private mode also needs `pasta` on
-  `PATH`; the Nix package provides it.
+- A systemd user manager for the `cgroup` resource backend and for `private`
+  networking. It is required by default: without it the sandbox refuses to
+  start instead of running with weaker limits. Select
+  `resources.backend = "rlimit"` to run without systemd. Private mode also
+  needs `pasta` on `PATH`; the Nix package provides it.
 
 ## Install and run
 
@@ -68,6 +69,14 @@ in
     packages = with pkgs; [ bash coreutils curl cacert ];
     env = { FOO = "bar"; };
     network = "private"; # "none", "private", or "host"
+    resources = {
+      enable = true;     # false disables the resource limits
+      backend = "cgroup"; # "cgroup" or "rlimit"
+      memory = "2G";
+      cpu = "100%";
+      tasks = 512;
+      timeout = "1h";
+    };
     mounts = [
       {
         host = "/host/path";
@@ -117,7 +126,10 @@ the configuration outside it:
       host = "/home/me/projects/app"; # defaults to the current directory
       mode = "rw";                    # or "ro"
     };
-    requireCgroup = false;            # true = refuse to run without systemd scope
+    resources = {
+      enable = true;      # false disables the resource limits
+      backend = "cgroup"; # "cgroup" or "rlimit"
+    };
   };
 }
 ```
@@ -143,25 +155,60 @@ Use `realm --config ./ci/realm.nix agent` to select a different file.
 `none` has no network interface or route. `private` gives the agent an isolated
 network namespace with pasta-based DNS and Internet access; it cannot reach
 services bound to host localhost. `host` shares the host network namespace.
-Private mode runs inside a transient systemd user scope with defaults of 2 GiB
-memory, 100% of one CPU, 512 tasks, and a one-hour wall-clock limit. A usable
-systemd user manager is required for this mode.
+`private` runs pasta inside the scope that carries the resource limits, so
+with the `cgroup` backend it needs a usable systemd user manager.
 
-Resource limits have an explicit failure policy:
+### Resource limits
 
-- With a systemd user scope, memory, CPU quota, task count, and wall-clock
-  time are enforced by cgroup v2.
-- Without systemd, `none` and `host` use `setrlimit` for address space,
-  process count, and CPU time, plus the coreutils `timeout` command for the
-  wall-clock limit. If any of these cannot be installed, the sandbox refuses
-  to start (fail-closed). `RLIMIT_AS` limits address space, not resident
-  memory. CPU quota is not enforceable by rlimits and is degraded to the
-  CPU-time cap. The process cap is `RLIMIT_NPROC`, which applies per user ID
-  to the whole host (512 by default), not per sandbox; a true per-sandbox
-  process cap needs cgroups, i.e. the systemd path.
-- `private` always requires systemd and fails closed without it.
-- Set `requireCgroup = true` to refuse all modes when no systemd scope is
-  available.
+The `resources` block declares the limits and the mechanism that enforces
+them. There is no implicit fallback: the selected backend is the only one
+that is used, and a backend that cannot be applied fails the launch.
+
+```nix
+{
+  resources = {
+    enable = true;
+    backend = "cgroup";
+
+    memory = "4G";   # cgroup MemoryMax / rlimit RLIMIT_AS
+    cpu = "200%";    # cgroup CPUQuota, in percent of one core
+    tasks = 512;     # cgroup TasksMax / rlimit RLIMIT_NPROC
+    timeout = "1h";  # cgroup RuntimeMaxSec / rlimit timeout + RLIMIT_CPU
+  };
+}
+```
+
+- `enable` (default `true`) turns the limits on. `enable = false` applies no
+  limit at all: no cgroup scope, no rlimits, no timeout, and no tmpfs size
+  cap.
+- `backend` (default `"cgroup"`) selects the mechanism:
+  - `"cgroup"` uses a transient systemd user scope (`systemd-run --user
+    --scope`) with cgroup v2 limits. Without a systemd user manager the
+    sandbox refuses to start; it does not fall back to rlimits.
+  - `"rlimit"` uses `setrlimit` for address space, process count, and CPU
+    time, plus the coreutils `timeout` command for the wall-clock limit. It
+    never switches to cgroups, even when a systemd user manager is
+    available. If a limit cannot be installed, the sandbox refuses to start
+    (fail-closed).
+- `memory` accepts a byte count (`4294967296`) or a size with a binary
+  suffix (`"512M"`, `"4G"`, `"1T"`); `1K` is 1024 bytes. Default: `2G`.
+- `cpu` accepts a percentage (`"200%"`); `100%` is one core. Default: `100%`.
+- `tasks` is a task/process count. Default: `512`.
+- `timeout` accepts seconds (`"90s"`), minutes (`"30m"`), hours (`"1h"`) or
+  days (`"1d"`). Default: `1h`.
+
+An omitted limit uses the default above. The defaults are fixed constants and
+never depend on the host environment.
+
+`RLIMIT_AS` limits address space, not resident memory. CPU quota is not
+enforceable by rlimits and is degraded to the CPU-time cap. The process cap
+is `RLIMIT_NPROC`, which applies per user ID to the whole host, not per
+sandbox; a true per-sandbox process cap needs cgroups, i.e. the `cgroup`
+backend.
+
+The removed `requireCgroup` option is ignored with a deprecation warning. Use
+`resources.backend = "cgroup"` to require cgroup limits (the default) and
+`resources.backend = "rlimit"` to allow the rlimit backend.
 
 Seccomp is not enabled in this version. The evaluation and rationale are in
 [SECURITY.md](SECURITY.md#seccomp-evaluation).

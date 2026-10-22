@@ -50,6 +50,7 @@ in
     packages = with pkgs; [ bash coreutils ];
     env = {{ }};
     network = "none";
+    resources = {{ enable = true; backend = "rlimit"; }};
     mounts = [
       {mounts}
     ];

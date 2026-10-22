@@ -3,8 +3,8 @@ pub mod eval;
 pub mod realize;
 
 use crate::error::Result;
-use crate::nix::eval::SandboxCfg;
-use crate::sandbox::spec::{BindMount, Mount, SandboxSpec};
+use crate::nix::eval::{ResourceCfg, SandboxCfg};
+use crate::sandbox::spec::{BindMount, Mount, ResourceLimits, SandboxSpec};
 
 pub fn build_spec(config: &std::path::Path, sandbox_name: &str) -> Result<SandboxSpec> {
     let config = if config.is_absolute() {
@@ -71,7 +71,7 @@ fn build_bwrap_spec(
 ) -> Result<SandboxSpec> {
     use crate::error::Error;
     use crate::sandbox::etc::GuestFs;
-    use crate::sandbox::spec::{Mount, NetworkMode, ResourceLimits, SandboxSpec};
+    use crate::sandbox::spec::{Mount, NetworkMode, SandboxSpec};
     use std::path::PathBuf;
 
     let network = match cfg.network.as_deref() {
@@ -85,10 +85,7 @@ fn build_bwrap_spec(
             )));
         }
     };
-    let limits = ResourceLimits {
-        require_cgroup: cfg.require_cgroup,
-        ..ResourceLimits::default()
-    };
+    let limits = resource_limits(&cfg.resources);
     let uid = 1000;
     let gid = 1000;
 
@@ -212,6 +209,23 @@ fn build_bwrap_spec(
         gid,
         keep_alive: vec![guest],
     })
+}
+
+/// Build the sandbox resource limits from the configuration.
+///
+/// An omitted limit keeps the built-in default. The defaults are fixed
+/// constants and never depend on the host environment.
+fn resource_limits(cfg: &ResourceCfg) -> ResourceLimits {
+    let defaults = ResourceLimits::default();
+    ResourceLimits {
+        enabled: cfg.enable,
+        backend: cfg.backend,
+        memory_bytes: cfg.memory_bytes.unwrap_or(defaults.memory_bytes),
+        cpu_percent: cfg.cpu_percent.unwrap_or(defaults.cpu_percent),
+        max_pids: cfg.max_pids.unwrap_or(defaults.max_pids),
+        timeout_secs: cfg.timeout_secs.or(defaults.timeout_secs),
+        tmpfs_bytes: defaults.tmpfs_bytes,
+    }
 }
 
 /// Normalize a declared guest or host path as a path tree.
@@ -414,6 +428,57 @@ fn user_mounts(bindings: &[BindMount], reserved: &[std::path::PathBuf]) -> Resul
         });
     }
     Ok(mounts)
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    use crate::nix::eval::ResourceCfg;
+    use crate::sandbox::spec::ResourceBackend;
+
+    fn config(enable: bool, backend: ResourceBackend) -> ResourceCfg {
+        ResourceCfg {
+            enable,
+            backend,
+            memory_bytes: None,
+            cpu_percent: None,
+            max_pids: None,
+            timeout_secs: None,
+        }
+    }
+
+    #[test]
+    fn omitted_limits_use_the_documented_defaults() {
+        let limits = resource_limits(&config(true, ResourceBackend::Cgroup));
+        assert!(limits.enabled);
+        assert_eq!(limits.backend, ResourceBackend::Cgroup);
+        assert_eq!(limits.memory_bytes, 2 * 1024 * 1024 * 1024);
+        assert_eq!(limits.cpu_percent, 100);
+        assert_eq!(limits.max_pids, 512);
+        assert_eq!(limits.timeout_secs, Some(3600));
+    }
+
+    #[test]
+    fn configured_limits_replace_the_defaults() {
+        let mut cfg = config(true, ResourceBackend::Rlimit);
+        cfg.memory_bytes = Some(4 * 1024 * 1024 * 1024);
+        cfg.cpu_percent = Some(200);
+        cfg.max_pids = Some(64);
+        cfg.timeout_secs = Some(60);
+        let limits = resource_limits(&cfg);
+        assert_eq!(limits.backend, ResourceBackend::Rlimit);
+        assert_eq!(limits.memory_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(limits.cpu_percent, 200);
+        assert_eq!(limits.max_pids, 64);
+        assert_eq!(limits.timeout_secs, Some(60));
+    }
+
+    #[test]
+    fn disabled_limits_keep_the_backend_but_apply_nothing() {
+        let limits = resource_limits(&config(false, ResourceBackend::Rlimit));
+        assert!(!limits.enabled);
+        assert_eq!(limits.backend, ResourceBackend::Rlimit);
+    }
 }
 
 #[cfg(test)]

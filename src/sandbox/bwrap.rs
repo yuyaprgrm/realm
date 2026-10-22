@@ -1,6 +1,5 @@
 use crate::error::{Error, Result};
 use crate::sandbox::spec::{Mount, SandboxSpec};
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -64,7 +63,11 @@ fn build_command_with(bwrap: &Path, spec: &SandboxSpec) -> Result<Command> {
                 cmd.arg("--dir").arg(target);
             }
             Mount::Tmpfs { target } => {
-                cmd.arg("--size").arg(spec.limits.tmpfs_bytes.to_string());
+                // The tmpfs size is a resource limit: it is not applied when
+                // the resource limits are disabled.
+                if spec.limits.enabled {
+                    cmd.arg("--size").arg(spec.limits.tmpfs_bytes.to_string());
+                }
                 cmd.arg("--tmpfs").arg(target);
             }
             Mount::Proc { target } => {
@@ -93,58 +96,6 @@ fn build_command_with(bwrap: &Path, spec: &SandboxSpec) -> Result<Command> {
     }
 
     Ok(cmd)
-}
-
-/// Apply fallback rlimits in the child before exec. Used when no cgroup
-/// wrapper is available. Address space, process count, and CPU-time are
-/// mandatory in this mode: if a limit cannot be installed, exec fails instead
-/// of running with silently weaker limits (fail-closed).
-pub fn apply_rlimits(cmd: &mut Command, spec: &SandboxSpec) -> Result<()> {
-    let mem = spec.limits.memory_bytes;
-    let cpu = spec.limits.timeout_secs.unwrap_or(0);
-    let nproc = spec.limits.max_pids as u64;
-
-    unsafe {
-        cmd.pre_exec(move || {
-            set_limit(libc::RLIMIT_AS, mem)?;
-            set_limit(libc::RLIMIT_NPROC, nproc)?;
-            set_limit(libc::RLIMIT_CPU, cpu)?;
-            Ok(())
-        });
-    }
-    Ok(())
-}
-
-/// Install a hard upper bound for `resource`.
-///
-/// `0` means "not configured" and is ignored. If the inherited hard limit is
-/// lower than the requested value the lower limit is kept; the maximum is
-/// never raised, so the sandbox cannot undo the cap later.
-fn set_limit(resource: libc::c_uint, value: u64) -> std::io::Result<()> {
-    if value == 0 {
-        return Ok(());
-    }
-    let mut current = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    if unsafe { libc::getrlimit(resource, &mut current) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let requested = value as libc::rlim_t;
-    let max = match current.rlim_max {
-        libc::RLIM_INFINITY => requested,
-        hard if hard < requested => hard,
-        _ => requested,
-    };
-    let lim = libc::rlimit {
-        rlim_cur: max,
-        rlim_max: max,
-    };
-    if unsafe { libc::setrlimit(resource, &lim) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -239,16 +190,10 @@ mod tests {
     }
 
     #[test]
-    fn fallback_rlimits_stop_a_child_that_exceeds_them() {
+    fn the_tmpfs_size_is_a_resource_limit() {
         let mut s = spec();
-        s.limits.timeout_secs = Some(1);
-        let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg("while :; do :; done");
-        apply_rlimits(&mut cmd, &s).unwrap();
-        let status = cmd.status().unwrap();
-        assert!(
-            !status.success(),
-            "child exceeded the CPU limit but still succeeded"
-        );
+        assert!(args_with(&s).contains(&"536870912".to_string()));
+        s.limits.enabled = false;
+        assert!(!args_with(&s).contains(&"536870912".to_string()));
     }
 }

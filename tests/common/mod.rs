@@ -81,6 +81,15 @@ pub fn private_network_unavailable() -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `systemd-run --user` can create a user scope.
+pub fn systemd_user_scope_available() -> bool {
+    Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "true"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 pub fn sandbox_available(test: &str) -> bool {
     report(test, sandbox_unavailable())
 }

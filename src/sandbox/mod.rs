@@ -1,7 +1,9 @@
 pub mod bwrap;
 pub mod cgroup;
 pub mod etc;
+pub mod limits;
 pub mod network;
+pub mod rlimit;
 pub mod spec;
 
 use crate::error::{Error, Result};
@@ -18,6 +20,6 @@ pub fn run(config: &std::path::Path, sandbox_name: &str, command: &[String]) -> 
         spec.executable = std::path::PathBuf::from(&command[0]);
         spec.args = command[1..].to_vec();
     }
-    let status = crate::sandbox::cgroup::exec_with_limits(&spec)?;
+    let status = crate::sandbox::limits::exec(&spec)?;
     Ok(status.code().unwrap_or(1))
 }
