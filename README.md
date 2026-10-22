@@ -107,6 +107,24 @@ Host-only variables such as `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, and
 PID namespace, and bwrap's own process environment is cleared so
 `/proc/1/environ` does not expose host values.
 
+### Progress feedback
+
+Preparing a sandbox takes time: Nix evaluates the configuration, realises the
+package closure, and bubblewrap builds the mount and namespace setup. While
+that runs, Realm shows a spinner on stderr:
+
+```text
+⠋ Preparing sandbox...
+```
+
+The spinner only says that Realm is still working. It never shows a
+percentage: the preparation time does not translate into one. The line is
+erased before the sandboxed process starts, so its output is not disturbed, and
+it is erased before an error message as well.
+
+The spinner needs a terminal. When stderr is a pipe, a file, or a CI log,
+nothing is written at all; `NO_COLOR` suppresses it too.
+
 ### Workspace and configuration trust
 
 The workspace is mounted read-write at `/workspace` by default. This is

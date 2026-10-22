@@ -14,9 +14,12 @@ use std::path::Path;
 use std::process::{Command, ExitStatus};
 
 /// Run the sandbox, applying the configured resource limits.
-pub fn exec(spec: &SandboxSpec) -> Result<ExitStatus> {
+pub fn exec(spec: &SandboxSpec, spinner: &mut crate::ui::Spinner) -> Result<ExitStatus> {
     let command = sandbox_command(spec)?;
     let mut command = wrap(spec, command)?;
+    // The sandboxed process writes to the terminal from here on, so the
+    // spinner must be gone before the process starts.
+    spinner.stop();
     command
         .status()
         .map_err(|error| Error::Bwrap(format!("spawn failed: {error}")))

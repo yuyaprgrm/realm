@@ -268,7 +268,7 @@ fn parse_sandbox_json(bytes: &[u8]) -> Result<SandboxCfg> {
     if let Some(value) = obj.get("requireCgroup")
         && !value.is_null()
     {
-        eprintln!("{}", require_cgroup_deprecation());
+        crate::ui::notice(require_cgroup_deprecation());
     }
 
     Ok(SandboxCfg {
