@@ -73,9 +73,6 @@ fn pasta_command(pasta_path: &Path, bwrap: &Command) -> Command {
         .arg("none")
         .arg("--udp-ns")
         .arg("none");
-    pasta
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
     pasta.arg(bwrap.get_program());
     pasta.args(bwrap.get_args());
     pasta

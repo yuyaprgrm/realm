@@ -1,11 +1,15 @@
 use crate::error::{Error, Result};
 use crate::sandbox::spec::{BindMount, ResourceBackend};
-use serde_json::Value;
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-#[derive(Debug, PartialEq, Eq)]
+/// A package from the evaluated configuration. The fields match the JSON
+/// shape, so packages are deserialized into this type directly.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct Package {
     /// output store path (may be unrealised)
     pub out: String,
@@ -50,6 +54,35 @@ pub struct SandboxCfg {
     pub mounts: Vec<BindMount>,
     pub workspace: Option<WorkspaceCfg>,
     pub resources: ResourceCfg,
+}
+
+/// JSON shape of one user-declared bind mount.
+#[derive(Deserialize)]
+struct Mount {
+    host: String,
+    guest: String,
+    mode: String,
+}
+
+/// JSON shape of the workspace block.
+#[derive(Deserialize)]
+struct Workspace {
+    host: Option<String>,
+    mode: Option<String>,
+}
+
+/// JSON shape of the resources block.
+///
+/// A limit may be a plain number or a unit string ("4G", "200%", "1h"), so
+/// the raw values are kept and interpreted by the parsers below.
+#[derive(Deserialize)]
+struct Resources {
+    enable: Option<Value>,
+    backend: Option<Value>,
+    memory: Option<Value>,
+    cpu: Option<Value>,
+    tasks: Option<Value>,
+    timeout: Option<Value>,
 }
 
 // Nix evaluates realm.nix and package derivations outside the sandbox.
@@ -127,132 +160,81 @@ pub fn eval_sandbox(config: &std::path::Path, name: &str) -> Result<SandboxCfg> 
     parse_sandbox_json(&out.stdout)
 }
 
+/// Deserialize one section of the evaluated configuration.
+///
+/// The section name is part of every error, so a malformed value can be
+/// located. A missing or null section becomes `None` when the section type
+/// is optional.
+fn section<T: DeserializeOwned>(object: &Map<String, Value>, name: &str) -> Result<T> {
+    T::deserialize(object.get(name).unwrap_or(&Value::Null))
+        .map_err(|error| Error::Nix(format!("{name}: {error}")))
+}
+
+/// Deserialize a section that must be a JSON object.
+fn object_section<T: DeserializeOwned>(object: &Map<String, Value>, name: &str) -> Result<T> {
+    let value = object.get(name).unwrap_or(&Value::Null);
+    if !value.is_null() && !value.is_object() {
+        return Err(Error::Nix(format!("{name} must be an object")));
+    }
+    section(object, name)
+}
+
 fn parse_sandbox_json(bytes: &[u8]) -> Result<SandboxCfg> {
-    let v: Value = serde_json::from_slice(bytes).map_err(|e| Error::Nix(e.to_string()))?;
-    let obj = v
+    let value: Value = serde_json::from_slice(bytes).map_err(|e| Error::Nix(e.to_string()))?;
+    let object = value
         .as_object()
         .ok_or_else(|| Error::Nix("sandbox must be object".into()))?;
-    let packages = obj
-        .get("packages")
-        .and_then(|x| x.as_array())
-        .ok_or_else(|| Error::Nix("packages must be array".into()))?;
-    let mut pkgs = Vec::new();
-    for (i, p) in packages.iter().enumerate() {
-        let o = p
-            .as_object()
-            .ok_or_else(|| Error::Nix(format!("packages[{i}] must be object")))?;
-        let out = o
-            .get("out")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| Error::Nix(format!("packages[{i}].out must be string")))?
-            .to_string();
-        let drv = match o.get("drv") {
-            None | Some(Value::Null) => None,
-            Some(x) => Some(
-                x.as_str()
-                    .ok_or_else(|| Error::Nix(format!("packages[{i}].drv must be string or null")))?
-                    .to_string(),
-            ),
-        };
-        if out.is_empty() {
-            return Err(Error::Nix(format!("packages[{i}].out must not be empty")));
-        }
-        pkgs.push(Package { out, drv });
+
+    let packages: Option<Vec<Package>> = section(object, "packages")?;
+    let propagated: Option<Vec<Vec<String>>> = section(object, "propagated")?;
+    let env: Option<HashMap<String, String>> = object_section(object, "env")?;
+    let network: Option<String> = section(object, "network")?;
+    let json_mounts: Option<Vec<Mount>> = section(object, "mounts")?;
+    let json_workspace: Option<Workspace> = object_section(object, "workspace")?;
+    let json_resources: Option<Resources> = object_section(object, "resources")?;
+    // `requireCgroup` was replaced by `resources.backend`; it is only read to
+    // print a deprecation warning.
+    if object
+        .get("requireCgroup")
+        .is_some_and(|value| !value.is_null())
+    {
+        crate::ui::notice(require_cgroup_deprecation());
     }
-    let mut propagated = Vec::new();
-    if let Some(p) = obj.get("propagated") {
-        let groups = p
-            .as_array()
-            .ok_or_else(|| Error::Nix("propagated must be array".into()))?;
-        for (i, group) in groups.iter().enumerate() {
-            let entries = group
-                .as_array()
-                .ok_or_else(|| Error::Nix(format!("propagated[{i}] must be array")))?;
-            let mut outs = Vec::new();
-            for (j, out) in entries.iter().enumerate() {
-                let out = out
-                    .as_str()
-                    .ok_or_else(|| Error::Nix(format!("propagated[{i}][{j}] must be string")))?;
-                outs.push(out.to_string());
-            }
-            propagated.push(outs);
-        }
-    } else {
-        propagated.resize(pkgs.len(), Vec::new());
-    }
-    let mut env = HashMap::new();
-    if let Some(e) = obj.get("env") {
-        if let Some(em) = e.as_object() {
-            for (k, v) in em {
-                if let Some(s) = v.as_str() {
-                    env.insert(k.clone(), s.to_string());
-                } else {
-                    return Err(Error::Nix("env values must be strings".into()));
-                }
-            }
-        } else {
-            return Err(Error::Nix("env must be object".into()));
+
+    let packages = packages.ok_or_else(|| Error::Nix("packages must be array".into()))?;
+    for (index, package) in packages.iter().enumerate() {
+        if package.out.is_empty() {
+            return Err(Error::Nix(format!(
+                "packages[{index}].out must not be empty"
+            )));
         }
     }
-    let network = match obj.get("network") {
-        None | Some(Value::Null) => None,
-        Some(v) => Some(
-            v.as_str()
-                .ok_or_else(|| Error::Nix("network must be a string".into()))?
-                .to_string(),
-        ),
-    };
+    let propagated = propagated.unwrap_or_else(|| vec![Vec::new(); packages.len()]);
+    let env = env.unwrap_or_default();
+
     let mut mounts = Vec::new();
-    if let Some(m) = obj.get("mounts") {
-        let entries = m
-            .as_array()
-            .ok_or_else(|| Error::Nix("mounts must be array".into()))?;
-        for (i, entry) in entries.iter().enumerate() {
-            let o = entry
-                .as_object()
-                .ok_or_else(|| Error::Nix(format!("mounts[{i}] must be object")))?;
-            let host = o
-                .get("host")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| Error::Nix(format!("mounts[{i}].host must be string")))?;
-            let guest = o
-                .get("guest")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| Error::Nix(format!("mounts[{i}].guest must be string")))?;
-            let mode = o
-                .get("mode")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| Error::Nix(format!("mounts[{i}].mode must be string")))?;
-            let read_only = match mode {
-                "ro" => true,
-                "rw" => false,
-                other => {
-                    return Err(Error::Nix(format!(
-                        "mounts[{i}].mode must be \"ro\" or \"rw\", got \"{other}\""
-                    )));
-                }
-            };
-            mounts.push(BindMount {
-                host: PathBuf::from(host),
-                guest: PathBuf::from(guest),
-                read_only,
-            });
-        }
+    for (index, mount) in json_mounts.unwrap_or_default().into_iter().enumerate() {
+        let read_only = match mount.mode.as_str() {
+            "ro" => true,
+            "rw" => false,
+            other => {
+                return Err(Error::Nix(format!(
+                    "mounts[{index}].mode must be \"ro\" or \"rw\", got \"{other}\""
+                )));
+            }
+        };
+        mounts.push(BindMount {
+            host: PathBuf::from(mount.host),
+            guest: PathBuf::from(mount.guest),
+            read_only,
+        });
     }
-    let workspace = match obj.get("workspace") {
-        None | Some(Value::Null) => None,
-        Some(value) => {
-            let w = value
-                .as_object()
-                .ok_or_else(|| Error::Nix("workspace must be an object".into()))?;
-            let host = match w.get("host") {
-                None | Some(Value::Null) => None,
-                Some(host) => Some(PathBuf::from(host.as_str().ok_or_else(|| {
-                    Error::Nix("workspace.host must be string or null".into())
-                })?)),
-            };
-            let mode = w.get("mode").and_then(|x| x.as_str()).unwrap_or("rw");
-            let read_only = match mode {
+
+    let workspace = match json_workspace {
+        None => None,
+        Some(workspace) => Some(WorkspaceCfg {
+            host: workspace.host.map(PathBuf::from),
+            read_only: match workspace.mode.as_deref().unwrap_or("rw") {
                 "rw" => false,
                 "ro" => true,
                 other => {
@@ -260,25 +242,18 @@ fn parse_sandbox_json(bytes: &[u8]) -> Result<SandboxCfg> {
                         "workspace.mode must be \"ro\" or \"rw\", got \"{other}\""
                     )));
                 }
-            };
-            Some(WorkspaceCfg { host, read_only })
-        }
+            },
+        }),
     };
-    let resources = parse_resources(obj.get("resources"))?;
-    if let Some(value) = obj.get("requireCgroup")
-        && !value.is_null()
-    {
-        crate::ui::notice(require_cgroup_deprecation());
-    }
 
     Ok(SandboxCfg {
-        packages: pkgs,
+        packages,
         propagated,
         env,
         network,
         mounts,
         workspace,
-        resources,
+        resources: parse_resources(json_resources)?,
     })
 }
 
@@ -290,54 +265,42 @@ fn require_cgroup_deprecation() -> &'static str {
 
 /// Parse the `resources` block. Absent or empty blocks keep the documented
 /// defaults: limits enabled, enforced by the cgroup backend.
-fn parse_resources(value: Option<&Value>) -> Result<ResourceCfg> {
-    let default = ResourceCfg {
-        enable: true,
-        backend: ResourceBackend::Cgroup,
-        memory_bytes: None,
-        cpu_percent: None,
-        max_pids: None,
-        timeout_secs: None,
+fn parse_resources(resources: Option<Resources>) -> Result<ResourceCfg> {
+    let Some(resources) = resources else {
+        return Ok(ResourceCfg {
+            enable: true,
+            backend: ResourceBackend::Cgroup,
+            memory_bytes: None,
+            cpu_percent: None,
+            max_pids: None,
+            timeout_secs: None,
+        });
     };
-    let Some(value) = value else {
-        return Ok(default);
-    };
-    if value.is_null() {
-        return Ok(default);
-    }
-    let object = value
-        .as_object()
-        .ok_or_else(|| Error::Nix("resources must be an object".into()))?;
     Ok(ResourceCfg {
-        enable: parse_enable(object.get("enable"))?,
-        backend: parse_backend(object.get("backend"))?,
-        memory_bytes: parse_memory(object.get("memory"))?,
-        cpu_percent: parse_cpu(object.get("cpu"))?,
-        max_pids: parse_tasks(object.get("tasks"))?,
-        timeout_secs: parse_timeout(object.get("timeout"))?,
+        enable: parse_enable(resources.enable)?,
+        backend: parse_backend(resources.backend)?,
+        memory_bytes: parse_memory(resources.memory)?,
+        cpu_percent: parse_cpu(resources.cpu)?,
+        max_pids: parse_tasks(resources.tasks)?,
+        timeout_secs: parse_timeout(resources.timeout)?,
     })
 }
 
-fn parse_enable(value: Option<&Value>) -> Result<bool> {
+fn parse_enable(value: Option<Value>) -> Result<bool> {
     match value {
-        None | Some(Value::Null) => Ok(true),
-        Some(value) => value
-            .as_bool()
-            .ok_or_else(|| Error::Nix("resources.enable must be a boolean".into())),
+        None => Ok(true),
+        Some(Value::Bool(enable)) => Ok(enable),
+        Some(_) => Err(Error::Nix("resources.enable must be a boolean".into())),
     }
 }
 
-fn parse_backend(value: Option<&Value>) -> Result<ResourceBackend> {
-    let Some(value) = value else {
-        return Ok(ResourceBackend::Cgroup);
+fn parse_backend(value: Option<Value>) -> Result<ResourceBackend> {
+    let name = match value {
+        None => return Ok(ResourceBackend::Cgroup),
+        Some(Value::String(name)) => name,
+        Some(_) => return Err(Error::Nix("resources.backend must be a string".into())),
     };
-    if value.is_null() {
-        return Ok(ResourceBackend::Cgroup);
-    }
-    let name = value
-        .as_str()
-        .ok_or_else(|| Error::Nix("resources.backend must be a string".into()))?;
-    ResourceBackend::parse(name).ok_or_else(|| {
+    ResourceBackend::parse(&name).ok_or_else(|| {
         Error::Nix(format!(
             "resources.backend must be \"{}\" or \"{}\", got \"{name}\"",
             ResourceBackend::Cgroup.name(),
@@ -346,18 +309,15 @@ fn parse_backend(value: Option<&Value>) -> Result<ResourceBackend> {
     })
 }
 
-fn parse_memory(value: Option<&Value>) -> Result<Option<u64>> {
+fn parse_memory(value: Option<Value>) -> Result<Option<u64>> {
     let Some(value) = value else {
         return Ok(None);
     };
-    if value.is_null() {
-        return Ok(None);
-    }
     let bytes = match value {
         Value::Number(number) => number.as_u64().ok_or_else(|| {
             Error::Nix("resources.memory must be a positive number of bytes".into())
         })?,
-        Value::String(text) => parse_size(text).ok_or_else(|| {
+        Value::String(text) => parse_size(&text).ok_or_else(|| {
             Error::Nix(format!(
                 "resources.memory must be a byte count or a size like \"4G\", got \"{text}\""
             ))
@@ -376,18 +336,15 @@ fn parse_memory(value: Option<&Value>) -> Result<Option<u64>> {
     Ok(Some(bytes))
 }
 
-fn parse_cpu(value: Option<&Value>) -> Result<Option<u32>> {
+fn parse_cpu(value: Option<Value>) -> Result<Option<u32>> {
     let Some(value) = value else {
         return Ok(None);
     };
-    if value.is_null() {
-        return Ok(None);
-    }
     let percent = match value {
         Value::Number(number) => number.as_u64().ok_or_else(|| {
             Error::Nix("resources.cpu must be a percentage between 1 and 100000".into())
         })?,
-        Value::String(text) => parse_percent(text).ok_or_else(|| {
+        Value::String(text) => parse_percent(&text).ok_or_else(|| {
             Error::Nix(format!(
                 "resources.cpu must be a percentage like \"200%\", got \"{text}\""
             ))
@@ -406,13 +363,10 @@ fn parse_cpu(value: Option<&Value>) -> Result<Option<u32>> {
     Ok(Some(percent as u32))
 }
 
-fn parse_tasks(value: Option<&Value>) -> Result<Option<u32>> {
+fn parse_tasks(value: Option<Value>) -> Result<Option<u32>> {
     let Some(value) = value else {
         return Ok(None);
     };
-    if value.is_null() {
-        return Ok(None);
-    }
     let tasks = value
         .as_u64()
         .ok_or_else(|| Error::Nix("resources.tasks must be a positive integer".into()))?;
@@ -424,18 +378,15 @@ fn parse_tasks(value: Option<&Value>) -> Result<Option<u32>> {
     Ok(Some(tasks as u32))
 }
 
-fn parse_timeout(value: Option<&Value>) -> Result<Option<u64>> {
+fn parse_timeout(value: Option<Value>) -> Result<Option<u64>> {
     let Some(value) = value else {
         return Ok(None);
     };
-    if value.is_null() {
-        return Ok(None);
-    }
     let seconds = match value {
         Value::Number(number) => number.as_u64().ok_or_else(|| {
             Error::Nix("resources.timeout must be a positive number of seconds".into())
         })?,
-        Value::String(text) => parse_duration(text).ok_or_else(|| {
+        Value::String(text) => parse_duration(&text).ok_or_else(|| {
             Error::Nix(format!(
                 "resources.timeout must be a duration like \"1h\", got \"{text}\""
             ))
@@ -595,12 +546,8 @@ mod tests {
         let json = br#"{"packages":[],"env":{},"mounts":[
             {"host":"/host","guest":"/sandbox","mode":"rx"}
         ]}"#;
-        assert!(
-            parse_sandbox_json(json)
-                .unwrap_err()
-                .to_string()
-                .contains("mode")
-        );
+        let error = parse_sandbox_json(json).unwrap_err().to_string();
+        assert!(error.contains("mounts[0].mode"), "{error}");
     }
 
     #[test]
@@ -626,12 +573,8 @@ mod tests {
         assert_eq!(cfg.resources.backend, ResourceBackend::Cgroup);
 
         let json = br#"{"packages":[],"env":{},"workspace":{"mode":"rx"}}"#;
-        assert!(
-            parse_sandbox_json(json)
-                .unwrap_err()
-                .to_string()
-                .contains("workspace.mode")
-        );
+        let error = parse_sandbox_json(json).unwrap_err().to_string();
+        assert!(error.contains("workspace.mode"), "{error}");
     }
 
     #[test]
@@ -710,6 +653,23 @@ mod tests {
             let error = parse_sandbox_json(json).unwrap_err().to_string();
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn rejects_a_malformed_document() {
+        let error = parse_sandbox_json(br#"{"packages":{}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("packages"), "{error}");
+        let error = parse_sandbox_json(br#"[]"#).unwrap_err().to_string();
+        assert!(error.contains("sandbox must be object"), "{error}");
+        let error = parse_sandbox_json(br#"{"packages":[{"out":""}]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("packages[0].out must not be empty"),
+            "{error}"
+        );
     }
 
     #[test]

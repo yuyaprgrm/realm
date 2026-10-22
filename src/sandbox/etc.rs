@@ -56,11 +56,17 @@ impl GuestFs {
             },
         ];
         // CA certs only when networking is enabled and a CA store path exists.
+        const CA_BUNDLES: &[&str] = &[
+            "etc/ssl/certs/ca-bundle.crt",
+            "etc/ssl/certs/ca-certificates.crt",
+            "etc/ssl/certs/ca-bundle.trust.crt",
+        ];
         if self.network.has_network()
-            && let Some(ca) = self.find_ca_bundle()
+            && let Some(ca) = self.find_in_packages(CA_BUNDLES)
         {
             let ssl = root.join("etc/ssl/certs");
-            self.write_symlink_file(&ssl, &ca)?;
+            std::fs::create_dir_all(&ssl)?;
+            std::os::unix::fs::symlink(&ca, ssl.join("ca-certificates.crt"))?;
             mounts.push(Mount::ReadOnly {
                 source: root.join("etc/ssl"),
                 target: PathBuf::from("/etc/ssl"),
@@ -139,27 +145,6 @@ impl GuestFs {
             }
         }
         None
-    }
-
-    /// A CA bundle in the listed packages, if any (`.../etc/ssl/certs/ca-bundle.crt`).
-    fn find_ca_bundle(&self) -> Option<PathBuf> {
-        const CANDIDATES: &[&str] = &[
-            "etc/ssl/certs/ca-bundle.crt",
-            "etc/ssl/certs/ca-certificates.crt",
-            "etc/ssl/certs/ca-bundle.trust.crt",
-        ];
-        self.packages.iter().map(PathBuf::from).find_map(|p| {
-            CANDIDATES
-                .iter()
-                .map(|c| p.join(c))
-                .find(|full| full.exists())
-        })
-    }
-
-    fn write_symlink_file(&self, dir: &Path, target: &Path) -> Result<()> {
-        std::fs::create_dir_all(dir)?;
-        std::os::unix::fs::symlink(target, dir.join("ca-certificates.crt"))?;
-        Ok(())
     }
 }
 

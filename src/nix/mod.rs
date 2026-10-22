@@ -7,11 +7,7 @@ use crate::nix::eval::{ResourceCfg, SandboxCfg};
 use crate::sandbox::spec::{BindMount, Mount, ResourceLimits, SandboxSpec};
 
 pub fn build_spec(config: &std::path::Path, sandbox_name: &str) -> Result<SandboxSpec> {
-    let config = if config.is_absolute() {
-        config.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(config)
-    };
+    let config = std::path::absolute(config)?;
     let config = config.canonicalize().map_err(|error| {
         crate::error::Error::Nix(format!(
             "cannot read Realm configuration {}: {error}",
@@ -153,18 +149,12 @@ fn build_bwrap_spec(
     env.push(("TMPDIR".to_string(), "/tmp".to_string()));
     env.push(("PWD".to_string(), "/workspace".to_string()));
     // build PATH from the listed packages, then their propagated outputs
-    let mut path_bins: Vec<PathBuf> = Vec::new();
-    for pkg in &cfg.packages {
-        path_bins.push(PathBuf::from(&pkg.out).join("bin"));
-    }
-    for group in &cfg.propagated {
-        for out in group {
-            path_bins.push(PathBuf::from(out).join("bin"));
-        }
-    }
-    let path_str = path_bins
+    let path_str = cfg
+        .packages
         .iter()
-        .map(|p| p.to_string_lossy())
+        .map(|pkg| pkg.out.as_str())
+        .chain(cfg.propagated.iter().flatten().map(String::as_str))
+        .map(|out| format!("{out}/bin"))
         .collect::<Vec<_>>()
         .join(":");
     env.push(("PATH".to_string(), path_str));
