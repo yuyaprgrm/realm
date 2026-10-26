@@ -12,7 +12,70 @@ use crate::sandbox::rlimit;
 use crate::sandbox::spec::{NetworkMode, ResourceBackend, SandboxSpec};
 use std::path::Path;
 use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicI32, Ordering};
 
+/// PID of the sandbox process that should receive terminal resize signals.
+/// `--new-session` detaches the sandbox from the host terminal's session, so
+/// the kernel no longer delivers SIGWINCH to it; Realm forwards the signal.
+static SANDBOX_PID: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn forward_sigwinch(_signal: libc::c_int) {
+    let root = SANDBOX_PID.load(Ordering::Relaxed);
+    if root <= 0 {
+        return;
+    }
+    // bwrap runs the agent in a separate PID namespace, so the kernel's
+    // SIGWINCH never reaches it. Walk /proc and signal every descendant of
+    // the sandbox root (and the root itself) so the terminal size update is
+    // delivered to the whole sandbox tree.
+    let mut targets = [0i32; 256];
+    let mut count = 0usize;
+    targets[count] = root;
+    count += 1;
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            break;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Ok(pid) = name.parse::<i32>() else {
+                continue;
+            };
+            if pid <= 0 || targets[..count].contains(&pid) {
+                continue;
+            }
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                continue;
+            };
+            let Some(close) = stat.rfind(')') else {
+                continue;
+            };
+            let rest = &stat[close + 1..];
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            // fields[0] is state, fields[1] is ppid
+            let Some(ppid) = fields.get(1).and_then(|value| value.parse::<i32>().ok()) else {
+                continue;
+            };
+            if targets[..count].contains(&ppid) {
+                if count < targets.len() {
+                    targets[count] = pid;
+                    count += 1;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    for target in &targets[..count] {
+        unsafe {
+            libc::kill(*target, libc::SIGWINCH);
+        }
+    }
+}
 /// Run the sandbox, applying the configured resource limits.
 pub fn exec(spec: &SandboxSpec, spinner: &mut crate::ui::Spinner) -> Result<ExitStatus> {
     let command = sandbox_command(spec)?;
@@ -20,9 +83,21 @@ pub fn exec(spec: &SandboxSpec, spinner: &mut crate::ui::Spinner) -> Result<Exit
     // The sandboxed process writes to the terminal from here on, so the
     // spinner must be gone before the process starts.
     spinner.stop();
-    command
-        .status()
-        .map_err(|error| Error::Bwrap(format!("spawn failed: {error}")))
+    let mut child = command
+        .spawn()
+        .map_err(|error| Error::Bwrap(format!("spawn failed: {error}")))?;
+    let pid = child.id() as i32;
+    SANDBOX_PID.store(pid, Ordering::Relaxed);
+    // Forward terminal resize signals that --new-session would otherwise drop.
+    unsafe {
+        libc::signal(libc::SIGWINCH, forward_sigwinch as *const () as libc::sighandler_t);
+    }
+    let status = child.wait();
+    SANDBOX_PID.store(0, Ordering::Relaxed);
+    unsafe {
+        libc::signal(libc::SIGWINCH, libc::SIG_DFL);
+    }
+    status.map_err(|error| Error::Bwrap(format!("wait failed: {error}")))
 }
 
 /// Wrap the sandbox command for the configured backend.

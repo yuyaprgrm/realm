@@ -40,7 +40,6 @@ fn apply_timeout_with(timeout: &Path, command: &mut Command, seconds: u64) {
         .arg("--signal=TERM")
         .arg("--kill-after=5s")
         .arg(format!("{seconds}s"))
-        .arg("--")
         .arg(command.get_program())
         .args(command.get_args());
     *command = wrapped;
@@ -132,7 +131,6 @@ mod tests {
                 "--signal=TERM",
                 "--kill-after=5s",
                 "60s",
-                "--",
                 "/usr/bin/bwrap",
                 "--unshare-pid"
             ]
