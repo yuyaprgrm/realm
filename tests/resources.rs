@@ -42,6 +42,7 @@ in
             .args([
                 "--config",
                 self.config.to_str().unwrap(),
+                "run",
                 "resources-test",
                 "--",
                 "bash",

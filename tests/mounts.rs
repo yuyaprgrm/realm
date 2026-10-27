@@ -69,6 +69,7 @@ in
             .args([
                 "--config",
                 self.config.to_str().unwrap(),
+                "run",
                 "mounts-test",
                 "--",
                 "bash",
@@ -85,6 +86,7 @@ in
     fn run_from_workspace(&self, script: &str) -> Output {
         Command::new(env!("CARGO_BIN_EXE_realm"))
             .args([
+                "run",
                 "mounts-test",
                 "--",
                 "bash",

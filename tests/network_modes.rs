@@ -124,6 +124,7 @@ fn run_sandbox(fixture: &Fixture, attr: &str, script: &str) -> std::process::Out
         .args([
             "--config",
             fixture.config.to_str().unwrap(),
+            "run",
             attr,
             "--",
             "bash",
@@ -322,6 +323,7 @@ fn private_is_launched_with_resource_limits() {
         .args([
             "--config",
             fixture.config.to_str().unwrap(),
+            "run",
             PRIVATE_ATTR,
             "--",
             "bash",

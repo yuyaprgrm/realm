@@ -8,6 +8,7 @@
 , makeWrapper
 , clippy
 , rustfmt
+, enableShellCompletions ? true
 }:
 
 rustPlatform.buildRustPackage {
@@ -34,6 +35,14 @@ rustPlatform.buildRustPackage {
 
   postInstall = ''
     wrapProgram $out/bin/realm --prefix PATH : ${lib.makeBinPath [ bubblewrap coreutils nix passt systemd ]}
+    ${lib.optionalString enableShellCompletions ''
+      mkdir -p $out/share/bash-completion/completions
+      $out/bin/realm completion bash > $out/share/bash-completion/completions/realm
+      mkdir -p $out/share/zsh/site-functions
+      $out/bin/realm completion zsh > $out/share/zsh/site-functions/_realm
+      mkdir -p $out/share/fish/vendor_completions.d
+      $out/bin/realm completion fish > $out/share/fish/vendor_completions.d/realm.fish
+    ''}
   '';
 
   meta = {

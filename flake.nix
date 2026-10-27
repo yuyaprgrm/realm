@@ -6,6 +6,9 @@
   outputs =
     { nixpkgs, ... }:
     let
+      # Toggle installation of shell completion scripts in the package.
+      enableShellCompletions = true;
+
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
 
@@ -20,7 +23,7 @@
       outputsBySystem = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; overlays = [ (import ./overlay.nix) ]; };
-          realm = pkgs.realm;
+          realm = pkgs.callPackage ./package.nix { inherit enableShellCompletions; };
         in
         {
           packages.default = realm;

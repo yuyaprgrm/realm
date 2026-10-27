@@ -74,7 +74,7 @@ impl SlowPreparation {
         );
         let mut command = Command::new(env!("CARGO_BIN_EXE_realm"));
         command
-            .args(["--config", self.config.to_str().unwrap(), "agent"])
+            .args(["--config", self.config.to_str().unwrap(), "run", "agent"])
             .env("PATH", path)
             .env_remove("NO_COLOR");
         command
@@ -104,7 +104,10 @@ fn a_terminal_sees_the_spinner_and_its_erasure() {
         "the spinner never appeared: {output:?}"
     );
     assert!(
-        output.matches("phase: evaluating sandbox configuration").count() > 1,
+        output
+            .matches("phase: evaluating sandbox configuration")
+            .count()
+            > 1,
         "the spinner did not animate: {output:?}"
     );
     let erased = output
@@ -171,6 +174,7 @@ fn the_sandboxed_process_output_is_not_touched() {
         .args([
             "--config",
             config.to_str().unwrap(),
+            "run",
             "progress-test",
             "--",
             "bash",
@@ -201,6 +205,7 @@ fn the_sandboxed_process_output_survives_the_spinner() {
         .args([
             "--config",
             config.to_str().unwrap(),
+            "run",
             "progress-test",
             "--",
             "bash",

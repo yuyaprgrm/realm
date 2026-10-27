@@ -153,7 +153,11 @@ pub fn progress(current: usize, total: usize, message: &str) {
 /// The bytes of one spinner frame: the frame, the message, no newline.
 fn write_frame(writer: &mut impl Write, frame: &str) -> std::io::Result<()> {
     let status = STATUS.lock().unwrap_or_else(|error| error.into_inner());
-    let status = if status.is_empty() { MESSAGE } else { status.as_str() };
+    let status = if status.is_empty() {
+        MESSAGE
+    } else {
+        status.as_str()
+    };
     let progress = *PROGRESS.lock().unwrap_or_else(|error| error.into_inner());
     if let Some((current, total)) = progress {
         write!(writer, "\r{frame} {status} ({current}/{total})")
@@ -161,7 +165,6 @@ fn write_frame(writer: &mut impl Write, frame: &str) -> std::io::Result<()> {
         write!(writer, "\r{frame} {status}")
     }
 }
-
 
 /// The bytes that erase the current line.
 fn erase_line(writer: &mut impl Write) -> std::io::Result<()> {

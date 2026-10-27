@@ -39,6 +39,7 @@ in
             .args([
                 "--config",
                 self.config.to_str().unwrap(),
+                "run",
                 "env-test",
                 "--",
                 "bash",

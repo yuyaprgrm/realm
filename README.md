@@ -48,12 +48,12 @@ Run directly from a local checkout without installing:
 
 ```bash
 nix run . -- --help
-nix run . -- agent
-nix run . -- agent -- bash -lc 'curl https://example.com'
+nix run . -- run agent
+nix run . -- run agent -- bash -lc 'curl https://example.com'
 ```
 
 By default, Realm reads `realm.nix` from the current directory. Select a named
-sandbox with `realm <name>` and optionally pass another config file with
+sandbox with `realm run <name>` and optionally pass another config file with
 `--config` / `-c`. The file is a Nix function returning a set of sandbox
 definitions. By default it gets Nixpkgs from the `nixpkgs` flake registry entry
 and creates `pkgs` for the current system:
@@ -168,7 +168,7 @@ outside the workspace.
 
 Nix still evaluates package derivations, realizes them, and calculates their
 runtime closure. The sandbox configuration no longer needs to be a flake output.
-Use `realm --config ./ci/realm.nix agent` to select a different file.
+Use `realm run --config ./ci/realm.nix agent` to select a different file.
 
 `none` has no network interface or route. `private` gives the agent an isolated
 network namespace with pasta-based DNS and Internet access; it cannot reach
