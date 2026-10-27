@@ -40,8 +40,12 @@
     in
     {
       overlays.default = import ./overlay.nix;
-      homeManagerModules.default = import ./home-manager-module.nix;
-      homeManagerModules.realm = homeManagerModules.default;
+      homeManagerModules =
+        let module = import ./home-manager-module.nix;
+        in {
+          default = module;
+          realm = module;
+        };
       packages = nixpkgs.lib.mapAttrs (_: value: value.packages) outputsBySystem;
       apps = nixpkgs.lib.mapAttrs (_: value: value.apps) outputsBySystem;
       devShells = nixpkgs.lib.mapAttrs (_: value: value.devShells) outputsBySystem;
