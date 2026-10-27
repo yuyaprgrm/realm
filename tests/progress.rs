@@ -100,11 +100,11 @@ fn a_terminal_sees_the_spinner_and_its_erasure() {
     );
 
     assert!(
-        output.contains("Preparing sandbox..."),
+        output.contains("phase: evaluating sandbox configuration"),
         "the spinner never appeared: {output:?}"
     );
     assert!(
-        output.matches("Preparing sandbox...").count() > 1,
+        output.matches("phase: evaluating sandbox configuration").count() > 1,
         "the spinner did not animate: {output:?}"
     );
     let erased = output

@@ -37,6 +37,7 @@ pub fn realize_packages(packages: &[Package]) -> Result<()> {
         );
     }
     let out = Command::new("nix-store")
+        .arg("--realise")
         .args(&targets)
         .output()
         .map_err(|e| Error::Nix(e.to_string()))?;
