@@ -24,9 +24,19 @@ pub fn realize_packages(packages: &[Package]) -> Result<()> {
     if targets.is_empty() {
         return Ok(());
     }
-    // one batched nix-store call; already-realised outputs are skipped above
+    let missing_packages: Vec<&Package> = packages
+        .iter()
+        .filter(|package| !std::path::Path::new(&package.out).exists())
+        .collect();
+    let total = targets.len().max(missing_packages.len()).max(1);
+    for (index, package) in missing_packages.iter().enumerate() {
+        crate::ui::progress(
+            index + 1,
+            total,
+            &format!("installing dependency {}", store_path_name(&package.out)),
+        );
+    }
     let out = Command::new("nix-store")
-        .arg("--realise")
         .args(&targets)
         .output()
         .map_err(|e| Error::Nix(e.to_string()))?;
@@ -55,6 +65,14 @@ pub fn realize_packages(packages: &[Package]) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn store_path_name(path: &str) -> &str {
+    let base = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    base.split_once('-').map(|(_, name)| name).unwrap_or(base)
 }
 
 #[cfg(test)]
@@ -87,5 +105,10 @@ mod tests {
     fn dedupes_targets() {
         let packages = vec![pkg("/nix/store/dup", None), pkg("/nix/store/dup", None)];
         assert_eq!(missing_targets(&packages), vec!["/nix/store/dup"]);
+    }
+    #[test]
+    fn store_path_name_strips_store_hash() {
+        assert_eq!(store_path_name("/nix/store/abc123-bash-5.2"), "bash-5.2");
+        assert_eq!(store_path_name("/nix/store/abc"), "abc");
     }
 }

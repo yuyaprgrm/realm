@@ -14,9 +14,12 @@ pub fn build_spec(config: &std::path::Path, sandbox_name: &str) -> Result<Sandbo
             config.display()
         ))
     })?;
+    crate::ui::status("phase: evaluating sandbox configuration");
     let sandbox_cfg = eval::eval_sandbox(&config, sandbox_name)?;
+    crate::ui::status("phase: realizing packages");
     realize::realize_packages(&sandbox_cfg.packages)?;
     let out_paths: Vec<String> = sandbox_cfg.packages.iter().map(|p| p.out.clone()).collect();
+    crate::ui::status("phase: computing package closure");
     let closure_paths = closure::get_closure(&out_paths)?;
     if !out_paths.is_empty() && closure_paths.is_empty() {
         return Err(crate::error::Error::Nix(

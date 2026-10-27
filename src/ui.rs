@@ -18,6 +18,8 @@ use std::time::Duration;
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const INTERVAL: Duration = Duration::from_millis(100);
 const MESSAGE: &str = "Preparing sandbox...";
+static STATUS: Mutex<String> = Mutex::new(String::new());
+static PROGRESS: Mutex<Option<(usize, usize)>> = Mutex::new(None);
 
 /// Serializes the terminal writes so the spinner and Realm's own messages
 /// never interleave.
@@ -47,6 +49,8 @@ impl Spinner {
                 handle: None,
             };
         }
+        *STATUS.lock().unwrap_or_else(|e| e.into_inner()) = String::from(MESSAGE);
+        *PROGRESS.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let (stop, receiver) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || spin(receiver));
         Spinner {
@@ -122,10 +126,42 @@ pub fn notice(message: &str) {
     let _ = stderr.flush();
 }
 
+/// Update the spinner's status line without printing a new line.
+pub fn status(message: &str) {
+    *STATUS.lock().unwrap_or_else(|error| error.into_inner()) = message.to_string();
+    *PROGRESS.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    if !std::io::stderr().is_terminal() || std::env::var_os("NO_COLOR").is_some() {
+        let _guard = terminal();
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "{message}");
+        let _ = stderr.flush();
+    }
+}
+
+/// Update the spinner's status line with a progress fraction.
+pub fn progress(current: usize, total: usize, message: &str) {
+    *STATUS.lock().unwrap_or_else(|error| error.into_inner()) = message.to_string();
+    *PROGRESS.lock().unwrap_or_else(|error| error.into_inner()) = Some((current, total));
+    if !std::io::stderr().is_terminal() || std::env::var_os("NO_COLOR").is_some() {
+        let _guard = terminal();
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "{message} ({current}/{total})");
+        let _ = stderr.flush();
+    }
+}
+
 /// The bytes of one spinner frame: the frame, the message, no newline.
 fn write_frame(writer: &mut impl Write, frame: &str) -> std::io::Result<()> {
-    write!(writer, "\r{frame} {MESSAGE}")
+    let status = STATUS.lock().unwrap_or_else(|error| error.into_inner());
+    let status = if status.is_empty() { MESSAGE } else { status.as_str() };
+    let progress = *PROGRESS.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some((current, total)) = progress {
+        write!(writer, "\r{frame} {status} ({current}/{total})")
+    } else {
+        write!(writer, "\r{frame} {status}")
+    }
 }
+
 
 /// The bytes that erase the current line.
 fn erase_line(writer: &mut impl Write) -> std::io::Result<()> {
