@@ -141,7 +141,7 @@ _realm() {
             return 0
             ;;
         realm__subcmd__run)
-            opts="-c -h --config --help"
+            opts="-c -h --config --help agent none-test private-test host-test"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

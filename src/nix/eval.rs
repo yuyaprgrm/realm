@@ -128,6 +128,30 @@ in {
     else null;
 }"#;
 
+/// List the sandbox names declared in a configuration file.
+///
+/// The configuration is a Nix function returning an attribute set, so the
+/// top-level attribute names are the sandbox names.
+pub fn list_sandboxes(config: &std::path::Path) -> Result<Vec<String>> {
+    let out = Command::new("nix")
+        .args([
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "eval",
+            "--impure",
+            "--json",
+            "--file",
+        ])
+        .arg(config)
+        .args(["--apply", "cfg: builtins.attrNames (cfg { })"])
+        .output()
+        .map_err(|e| Error::Nix(e.to_string()))?;
+    if !out.status.success() {
+        return Err(Error::Nix(String::from_utf8_lossy(&out.stderr).into()));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| Error::Nix(e.to_string()))
+}
+
 pub fn eval_sandbox(config: &std::path::Path, name: &str) -> Result<SandboxCfg> {
     if name.is_empty()
         || !name

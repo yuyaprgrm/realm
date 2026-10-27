@@ -36,3 +36,4 @@ complete -c realm -n "__fish_realm_using_subcommand completion" -s h -l help -d 
 complete -c realm -n "__fish_realm_using_subcommand help; and not __fish_seen_subcommand_from run completion help" -f -a "run" -d 'Run a sandbox'
 complete -c realm -n "__fish_realm_using_subcommand help; and not __fish_seen_subcommand_from run completion help" -f -a "completion" -d 'Generate a shell completion script for the given shell'
 complete -c realm -n "__fish_realm_using_subcommand help; and not __fish_seen_subcommand_from run completion help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c realm -n "__fish_realm_using_subcommand run" -f -a "agent none-test private-test host-test"

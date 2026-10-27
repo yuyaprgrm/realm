@@ -45,8 +45,40 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(code);
         }
         Commands::Completion { shell } => {
+            let names = realm::nix::list_sandboxes(&args.config).ok();
             let mut cmd = Args::command();
-            generate(shell, &mut cmd, "realm", &mut std::io::stdout());
+            // Suggest the sandbox names declared in the selected configuration.
+            if let Some(names) = &names
+                && let Some(run) = cmd.get_subcommands_mut().find(|c| c.get_name() == "run")
+            {
+                let possible: Vec<clap::builder::PossibleValue> = names
+                    .clone()
+                    .into_iter()
+                    .map(clap::builder::PossibleValue::new)
+                    .collect();
+                *run = run.clone().mut_args(|arg| {
+                    if arg.get_id() == "sandbox" {
+                        arg.value_parser(clap::builder::PossibleValuesParser::new(possible.clone()))
+                    } else {
+                        arg
+                    }
+                });
+            }
+            let mut buf = Vec::new();
+            generate(shell, &mut cmd, "realm", &mut buf);
+            // fish completion does not emit positional possible values; add them.
+            if shell == Shell::Fish
+                && let Some(names) = &names
+            {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    buf,
+                    "complete -c realm -n \"__fish_realm_using_subcommand run\" -f -a \"{}\"",
+                    names.join(" ")
+                );
+            }
+            use std::io::Write as _;
+            std::io::stdout().write_all(&buf)?;
             Ok(())
         }
     }

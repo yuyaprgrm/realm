@@ -34,7 +34,7 @@ _arguments "${_arguments_options[@]}" : \
 '--config=[]:FILE:_files' \
 '-h[Print help]' \
 '--help[Print help]' \
-':sandbox:_default' \
+':sandbox:(agent none-test private-test host-test)' \
 '*::command:_default' \
 && ret=0
 ;;

@@ -6,6 +6,18 @@ use crate::error::Result;
 use crate::nix::eval::{ResourceCfg, SandboxCfg};
 use crate::sandbox::spec::{BindMount, Mount, ResourceLimits, SandboxSpec};
 
+/// List the sandbox names declared in a configuration file.
+pub fn list_sandboxes(config: &std::path::Path) -> Result<Vec<String>> {
+    let config = std::path::absolute(config)?;
+    let config = config.canonicalize().map_err(|error| {
+        crate::error::Error::Nix(format!(
+            "cannot read Realm configuration {}: {error}",
+            config.display()
+        ))
+    })?;
+    eval::list_sandboxes(&config)
+}
+
 pub fn build_spec(config: &std::path::Path, sandbox_name: &str) -> Result<SandboxSpec> {
     let config = std::path::absolute(config)?;
     let config = config.canonicalize().map_err(|error| {
