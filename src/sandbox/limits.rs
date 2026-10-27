@@ -60,12 +60,10 @@ extern "C" fn forward_sigwinch(_signal: libc::c_int) {
             let Some(ppid) = fields.get(1).and_then(|value| value.parse::<i32>().ok()) else {
                 continue;
             };
-            if targets[..count].contains(&ppid) {
-                if count < targets.len() {
-                    targets[count] = pid;
-                    count += 1;
-                    changed = true;
-                }
+            if targets[..count].contains(&ppid) && count < targets.len() {
+                targets[count] = pid;
+                count += 1;
+                changed = true;
             }
         }
     }
@@ -90,7 +88,10 @@ pub fn exec(spec: &SandboxSpec, spinner: &mut crate::ui::Spinner) -> Result<Exit
     SANDBOX_PID.store(pid, Ordering::Relaxed);
     // Forward terminal resize signals that --new-session would otherwise drop.
     unsafe {
-        libc::signal(libc::SIGWINCH, forward_sigwinch as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGWINCH,
+            forward_sigwinch as *const () as libc::sighandler_t,
+        );
     }
     let status = child.wait();
     SANDBOX_PID.store(0, Ordering::Relaxed);
