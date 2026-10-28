@@ -297,7 +297,15 @@ mod tests {
     }
 
     fn stat(pid: i32, ppid: i32, pgrp: i32, sid: i32) -> (i32, ProcStat) {
-        (pid, ProcStat { state: b'S', ppid, pgrp, sid })
+        (
+            pid,
+            ProcStat {
+                state: b'S',
+                ppid,
+                pgrp,
+                sid,
+            },
+        )
     }
 
     #[test]
@@ -305,11 +313,11 @@ mod tests {
         // pasta/timeout -> bwrap monitor -> setsid child (reaper) -> command,
         // all identified by (pid, ppid, pgrp, sid).
         let procs = [
-            stat(80, 1, 80, 80),    // pasta, Realm's own group
-            stat(81, 80, 80, 80),   // bwrap monitor, still in Realm's group
-            stat(82, 81, 82, 82),   // bwrap's setsid child = the sandbox group
-            stat(83, 82, 82, 82),   // the command, in that group
-            stat(84, 83, 84, 84),   // a later daemon with its own session
+            stat(80, 1, 80, 80),  // pasta, Realm's own group
+            stat(81, 80, 80, 80), // bwrap monitor, still in Realm's group
+            stat(82, 81, 82, 82), // bwrap's setsid child = the sandbox group
+            stat(83, 82, 82, 82), // the command, in that group
+            stat(84, 83, 84, 84), // a later daemon with its own session
         ];
         assert_eq!(find_sandbox_pgid(80, &procs), Some(82));
     }
@@ -318,9 +326,9 @@ mod tests {
     fn a_new_process_group_within_the_same_session_is_not_the_group() {
         // GNU timeout's child: setpgid(0,0) but no setsid.
         let procs = [
-            stat(80, 1, 80, 80),    // timeout, Realm's group
-            stat(81, 80, 81, 80),   // bwrap monitor in its own group, same session
-            stat(82, 81, 82, 82),   // bwrap's setsid child = the sandbox group
+            stat(80, 1, 80, 80),  // timeout, Realm's group
+            stat(81, 80, 81, 80), // bwrap monitor in its own group, same session
+            stat(82, 81, 82, 82), // bwrap's setsid child = the sandbox group
         ];
         assert_eq!(find_sandbox_pgid(80, &procs), Some(82));
     }
