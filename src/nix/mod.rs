@@ -285,11 +285,71 @@ fn normalize_declared_path(path: &std::path::Path, kind: &str) -> Result<std::pa
 fn normalized_host_path(path: &std::path::Path, kind: &str) -> Result<std::path::PathBuf> {
     use crate::error::Error;
 
-    let declared = normalize_declared_path(path, kind)?;
+    // Expand a leading `~` to the host user's home directory. Only `~` itself
+    // and `~/...` are expanded; `~user` stays as-is and is rejected below.
+    let expanded = if path == std::path::Path::new("~") {
+        std::path::PathBuf::from(std::env::var("HOME").map_err(|error| {
+            Error::Spec(format!(
+                "{kind} host path ~ cannot be expanded: HOME is not set ({error})"
+            ))
+        })?)
+    } else if let Ok(rest) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME").map_err(|error| {
+            Error::Spec(format!(
+                "{kind} host path ~ cannot be expanded: HOME is not set ({error})"
+            ))
+        })?;
+        std::path::Path::new(&home).join(rest)
+    } else {
+        path.to_path_buf()
+    };
+
+    let declared = normalize_declared_path(&expanded, kind)?;
+    // Reject symlinks in any existing prefix of the original path before
+    // auto-creating anything. Otherwise a missing tail could be created under
+    // a symlinked ancestor and bypass validation.
+    {
+        let mut existing = expanded.clone();
+        while !existing.exists() && existing != std::path::Path::new("/") {
+            if let Some(parent) = existing.parent() {
+                existing = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+        let canonical_prefix = if existing.exists() {
+            std::fs::canonicalize(&existing).map_err(|error| {
+                Error::Spec(format!(
+                    "{kind} host path {} is not accessible: {error}",
+                    declared.display()
+                ))
+            })?
+        } else {
+            std::path::PathBuf::from("/")
+        };
+        let prefix_len = existing.components().count();
+        let declared_prefix: std::path::PathBuf = declared.components().take(prefix_len).collect();
+        if canonical_prefix != declared_prefix {
+            return Err(Error::Spec(format!(
+                "{kind} host path {} resolves to {}; symlinks and non-lexical `..` traversal are not allowed",
+                declared.display(),
+                canonical_prefix.display()
+            )));
+        }
+    }
+    // Auto-create missing host directories before validation.
+    if !declared.exists() {
+        std::fs::create_dir_all(&declared).map_err(|error| {
+            Error::Spec(format!(
+                "{kind} host path {} could not be created: {error}",
+                declared.display()
+            ))
+        })?;
+    }
     // Resolve the original path with normal OS semantics and compare it with
     // the lexical tree. This rejects symlinks even when a `..` component would
     // otherwise remove the symlink from the normalized path.
-    let canonical = std::fs::canonicalize(path).map_err(|error| {
+    let canonical = std::fs::canonicalize(&declared).map_err(|error| {
         Error::Spec(format!(
             "{kind} host path {} is not accessible: {error}",
             declared.display()

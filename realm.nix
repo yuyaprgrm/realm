@@ -4,31 +4,36 @@
 }:
 let
   pkgs = import nixpkgs.sourceInfo.outPath { inherit system; };
+  realm = builtins.getFlake "git+file:///home/yuya/projects/20_sandbox/realm/";
+  home = realm.lib.home;
 in
 {
   agent = {
     packages = with pkgs; [
       bash
+
       coreutils
       git
       ripgrep
       fd
-      opencode
       curl
       cacert
+      gnused
+      gnugrep
+
       cargo
       rustc
       rustfmt
       clippy
       clang
       mold
-      gnused
-      gnugrep
-      bubblewrap
-      passt
+
+      nix
+
+      opencode
     ];
     env = {
-      FOO = "bar";
+      CARGO_HOME = "/home/sandbox/.cargo";
     };
     network = "private";
     resources = {
@@ -40,70 +45,26 @@ in
       timeout = "1h";
     };
     mounts = [
-
       {
-        host = "/home/yuya/.config/opencode";
-        guest = "/home/sandbox/.config/opencode";
-        mode = "ro";
+        host = home.globalPath ".cargo";
+        guest = "/home/sandbox/.cargo";
+        mode = "rw";
       }
       {
-        host = "/home/yuya/.local/share/opencode";
+        host = home.globalPath ".config/opencode";
+        guest = "/home/sandbox/.config/opencode";
+        mode = "rw";
+      }
+      {
+        host = home.globalPath ".local/share/opencode";
         guest = "/home/sandbox/.local/share/opencode";
         mode = "rw";
       }
       {
-        host = "/home/yuya/.cache/opencode";
+        host = home.globalPath ".cache/opencode";
         guest = "/home/sandbox/.cache/opencode";
         mode = "rw";
       }
     ];
-  };
-
-  none-test = {
-    packages = with pkgs; [
-      bash
-      coreutils
-      curl
-      procps
-      cacert
-    ];
-    env = { };
-    network = "none";
-    resources = {
-      enable = true;
-      backend = "rlimit";
-    };
-  };
-
-  private-test = {
-    packages = with pkgs; [
-      bash
-      coreutils
-      curl
-      procps
-      cacert
-    ];
-    env = { };
-    network = "private";
-    resources = {
-      enable = true;
-      backend = "cgroup";
-    };
-  };
-
-  host-test = {
-    packages = with pkgs; [
-      bash
-      coreutils
-      curl
-      procps
-      cacert
-    ];
-    env = { };
-    network = "host";
-    resources = {
-      enable = true;
-      backend = "rlimit";
-    };
   };
 }

@@ -39,6 +39,17 @@
         });
     in
     {
+      lib = {
+        home = {
+          global = "~/.cache/realm/global";
+          project = workspace: "~/.cache/realm/" + builtins.hashString "sha256" workspace;
+          # Structured helpers for nested paths, e.g. `home.globalPath ".cargo/registry"`.
+          globalPath = path: "~/.cache/realm/global" + (if path == "" then "" else "/" + path);
+          projectPath = workspace: path:
+            "~/.cache/realm/" + builtins.hashString "sha256" workspace
+            + (if path == "" then "" else "/" + path);
+        };
+      };
       overlays.default = import ./overlay.nix;
       homeManagerModules =
         let module = import ./home-manager-module.nix;
